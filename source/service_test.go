@@ -2307,6 +2307,34 @@ func TestServiceSourceNodePortServices(t *testing.T) {
 				},
 			}},
 		},
+		{
+			title:        "annotated NodePort services with an AWS Load Balancer annotation return an endpoint with the address from the status.loadBalancer.ingress",
+			svcNamespace: "testing",
+			svcName:      "foo",
+			svcType:      v1.ServiceTypeNodePort,
+			labels:       map[string]string{},
+			annotations: map[string]string{
+				hostnameAnnotationKey:         "foo.example.org.",
+				AwsLoadBalancerTypeAnnotation: "nlb-ip",
+			},
+			lbs: []string{"some-load-balancer.elb.us-east-1-amazonaws.com"},
+			expected: []*endpoint.Endpoint{
+				{
+					DNSName:    "foo.example.org",
+					Targets:    endpoint.Targets{"some-load-balancer.elb.us-east-1-amazonaws.com"},
+					RecordType: endpoint.RecordTypeCNAME,
+					ProviderSpecific: []endpoint.ProviderSpecificProperty{
+						{
+							Name:  AwsLoadBalancerTypeAnnotation,
+							Value: "nlb-ip",
+						},
+					},
+				},
+			},
+			// podNames:  []string{},
+			// nodeIndex: []int{},
+			// phases:    []v1.PodPhase{},
+		},
 	} {
 
 		t.Run(tc.title, func(t *testing.T) {
@@ -2347,6 +2375,15 @@ func TestServiceSourceNodePortServices(t *testing.T) {
 				require.NoError(t, err)
 			}
 
+			var ingresses []v1.LoadBalancerIngress
+			for _, lb := range tc.lbs {
+				if net.ParseIP(lb) != nil {
+					ingresses = append(ingresses, v1.LoadBalancerIngress{IP: lb})
+				} else {
+					ingresses = append(ingresses, v1.LoadBalancerIngress{Hostname: lb})
+				}
+			}
+
 			// Create a service to test against
 			service := &v1.Service{
 				Spec: v1.ServiceSpec{
@@ -2363,6 +2400,11 @@ func TestServiceSourceNodePortServices(t *testing.T) {
 					Name:        tc.svcName,
 					Labels:      tc.labels,
 					Annotations: tc.annotations,
+				},
+				Status: v1.ServiceStatus{
+					LoadBalancer: v1.LoadBalancerStatus{
+						Ingress: ingresses,
+					},
 				},
 			}
 
