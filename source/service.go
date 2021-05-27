@@ -509,13 +509,17 @@ func (sc *serviceSource) generateEndpoints(svc *v1.Service, hostname string, pro
 				targets = extractServiceIps(svc)
 			}
 		case v1.ServiceTypeNodePort:
-			// add the nodeTargets and extract an SRV endpoint
-			targets, err = sc.extractNodePortTargets(svc)
-			if err != nil {
-				log.Errorf("Unable to extract targets from service %s/%s error: %v", svc.Namespace, svc.Name, err)
-				return endpoints
+			if _, ok := getProviderSpecificProperty(AwsLoadBalancerTypeAnnotation, providerSpecific); ok {
+				targets = extractLoadBalancerTargets(svc, false)
+			} else {
+				// add the nodeTargets and extract an SRV endpoint
+				targets, err = sc.extractNodePortTargets(svc)
+				if err != nil {
+					log.Errorf("Unable to extract targets from service %s/%s error: %v", svc.Namespace, svc.Name, err)
+					return endpoints
+				}
+				endpoints = append(endpoints, sc.extractNodePortEndpoints(svc, hostname, ttl)...)
 			}
-			endpoints = append(endpoints, sc.extractNodePortEndpoints(svc, hostname, ttl)...)
 		case v1.ServiceTypeExternalName:
 			targets = extractServiceExternalName(svc)
 		}
@@ -707,4 +711,14 @@ func (sc *serviceSource) AddEventHandler(ctx context.Context, handler func()) {
 	// Right now there is no way to remove event handler from informer, see:
 	// https://github.com/kubernetes/kubernetes/issues/79610
 	sc.serviceInformer.Informer().AddEventHandler(eventHandlerFunc(handler))
+}
+
+// getProviderSpecificProperty returns an endpoint.ProviderSpecificProperty if the property exists.
+func getProviderSpecificProperty(key string, properties endpoint.ProviderSpecific) (endpoint.ProviderSpecificProperty, bool) {
+	for _, providerSpecific := range properties {
+		if providerSpecific.Name == key {
+			return providerSpecific, true
+		}
+	}
+	return endpoint.ProviderSpecificProperty{}, false
 }
