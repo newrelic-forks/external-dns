@@ -218,7 +218,7 @@ kind: ServiceAccount
 metadata:
   name: external-dns
 ---
-apiVersion: rbac.authorization.k8s.io/v1beta1
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: external-dns
@@ -233,7 +233,7 @@ rules:
   resources: ["nodes"]
   verbs: ["list"]
 ---
-apiVersion: rbac.authorization.k8s.io/v1beta1
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: external-dns-viewer
@@ -271,6 +271,7 @@ spec:
         - --domain-filter=example.com # (optional) limit to only example.com domains; change to match the zone created above.
         - --provider=azure
         - --azure-resource-group=externaldns # (optional) use the DNS zones from the tutorial's resource group
+        - --txt-prefix=externaldns-
         volumeMounts:
         - name: azure-config-file
           mountPath: /etc/kubernetes
@@ -295,7 +296,7 @@ kind: ServiceAccount
 metadata:
   name: external-dns
 ---
-apiVersion: rbac.authorization.k8s.io/v1beta1
+apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: external-dns
@@ -307,7 +308,7 @@ rules:
   resources: ["ingresses"]
   verbs: ["get","watch","list"]
 ---
-apiVersion: rbac.authorization.k8s.io/v1beta1
+apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: external-dns
