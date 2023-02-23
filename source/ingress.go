@@ -26,11 +26,11 @@ import (
 	"time"
 
 	log "github.com/sirupsen/logrus"
-	"k8s.io/api/extensions/v1beta1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/wait"
 	kubeinformers "k8s.io/client-go/informers"
-	extinformers "k8s.io/client-go/informers/extensions/v1beta1"
+	networkinginformers "k8s.io/client-go/informers/networking/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 
@@ -55,7 +55,7 @@ type ingressSource struct {
 	fqdnTemplate             *template.Template
 	combineFQDNAnnotation    bool
 	ignoreHostnameAnnotation bool
-	ingressInformer          extinformers.IngressInformer
+	ingressInformer          networkinginformers.IngressInformer
 	ignoreIngressTLSSpec     bool
 }
 
@@ -77,7 +77,7 @@ func NewIngressSource(kubeClient kubernetes.Interface, namespace, annotationFilt
 	// Use shared informer to listen for add/update/delete of ingresses in the specified namespace.
 	// Set resync period to 0, to prevent processing when nothing has changed.
 	informerFactory := kubeinformers.NewSharedInformerFactoryWithOptions(kubeClient, 0, kubeinformers.WithNamespace(namespace))
-	ingressInformer := informerFactory.Extensions().V1beta1().Ingresses()
+	ingressInformer := informerFactory.Networking().V1().Ingresses()
 
 	// Add default resource event handlers to properly initialize informer.
 	ingressInformer.Informer().AddEventHandler(
@@ -168,7 +168,7 @@ func (sc *ingressSource) Endpoints(ctx context.Context) ([]*endpoint.Endpoint, e
 	return endpoints, nil
 }
 
-func (sc *ingressSource) endpointsFromTemplate(ing *v1beta1.Ingress) ([]*endpoint.Endpoint, error) {
+func (sc *ingressSource) endpointsFromTemplate(ing *networkingv1.Ingress) ([]*endpoint.Endpoint, error) {
 	// Process the whole template string
 	var buf bytes.Buffer
 	err := sc.fqdnTemplate.Execute(&buf, ing)
@@ -202,7 +202,7 @@ func (sc *ingressSource) endpointsFromTemplate(ing *v1beta1.Ingress) ([]*endpoin
 }
 
 // filterByAnnotations filters a list of ingresses by a given annotation selector.
-func (sc *ingressSource) filterByAnnotations(ingresses []*v1beta1.Ingress) ([]*v1beta1.Ingress, error) {
+func (sc *ingressSource) filterByAnnotations(ingresses []*networkingv1.Ingress) ([]*networkingv1.Ingress, error) {
 	selector, err := getLabelSelector(sc.annotationFilter)
 	if err != nil {
 		return nil, err
@@ -213,7 +213,7 @@ func (sc *ingressSource) filterByAnnotations(ingresses []*v1beta1.Ingress) ([]*v
 		return ingresses, nil
 	}
 
-	filteredList := []*v1beta1.Ingress{}
+	filteredList := []*networkingv1.Ingress{}
 
 	for _, ingress := range ingresses {
 		// include ingress if its annotations match the selector
@@ -225,13 +225,13 @@ func (sc *ingressSource) filterByAnnotations(ingresses []*v1beta1.Ingress) ([]*v
 	return filteredList, nil
 }
 
-func (sc *ingressSource) setResourceLabel(ingress *v1beta1.Ingress, endpoints []*endpoint.Endpoint) {
+func (sc *ingressSource) setResourceLabel(ingress *networkingv1.Ingress, endpoints []*endpoint.Endpoint) {
 	for _, ep := range endpoints {
 		ep.Labels[endpoint.ResourceLabelKey] = fmt.Sprintf("ingress/%s/%s", ingress.Namespace, ingress.Name)
 	}
 }
 
-func (sc *ingressSource) setDualstackLabel(ingress *v1beta1.Ingress, endpoints []*endpoint.Endpoint) {
+func (sc *ingressSource) setDualstackLabel(ingress *networkingv1.Ingress, endpoints []*endpoint.Endpoint) {
 	val, ok := ingress.Annotations[ALBDualstackAnnotationKey]
 	if ok && val == ALBDualstackAnnotationValue {
 		log.Debugf("Adding dualstack label to ingress %s/%s.", ingress.Namespace, ingress.Name)
@@ -242,7 +242,7 @@ func (sc *ingressSource) setDualstackLabel(ingress *v1beta1.Ingress, endpoints [
 }
 
 // endpointsFromIngress extracts the endpoints from ingress object
-func endpointsFromIngress(ing *v1beta1.Ingress, ignoreHostnameAnnotation bool, ignoreIngressTLSSpec bool) []*endpoint.Endpoint {
+func endpointsFromIngress(ing *networkingv1.Ingress, ignoreHostnameAnnotation bool, ignoreIngressTLSSpec bool) []*endpoint.Endpoint {
 	var endpoints []*endpoint.Endpoint
 
 	ttl, err := getTTLFromAnnotations(ing.Annotations)
@@ -287,7 +287,7 @@ func endpointsFromIngress(ing *v1beta1.Ingress, ignoreHostnameAnnotation bool, i
 	return endpoints
 }
 
-func targetsFromIngressStatus(status v1beta1.IngressStatus) endpoint.Targets {
+func targetsFromIngressStatus(status networkingv1.IngressStatus) endpoint.Targets {
 	var targets endpoint.Targets
 
 	for _, lb := range status.LoadBalancer.Ingress {

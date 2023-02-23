@@ -265,6 +265,28 @@ func TestGlooSource(t *testing.T) {
 	assert.Len(t, endpoints, 5)
 	assert.Equal(t, endpoints, []*endpoint.Endpoint{
 		&endpoint.Endpoint{
+			DNSName:          "d.test",
+			Targets:          []string{externalProxySvc.Status.LoadBalancer.Ingress[0].Hostname, externalProxySvc.Status.LoadBalancer.Ingress[1].Hostname, externalProxySvc.Status.LoadBalancer.Ingress[2].Hostname},
+			RecordType:       endpoint.RecordTypeCNAME,
+			RecordTTL:        0,
+			Labels:           endpoint.Labels{},
+			ProviderSpecific: endpoint.ProviderSpecific{},
+		},
+		&endpoint.Endpoint{
+			DNSName:       "e.test",
+			Targets:       []string{externalProxySvc.Status.LoadBalancer.Ingress[0].Hostname, externalProxySvc.Status.LoadBalancer.Ingress[1].Hostname, externalProxySvc.Status.LoadBalancer.Ingress[2].Hostname},
+			RecordType:    endpoint.RecordTypeCNAME,
+			SetIdentifier: "identifier-external",
+			RecordTTL:     24,
+			Labels:        endpoint.Labels{},
+			ProviderSpecific: endpoint.ProviderSpecific{
+				endpoint.ProviderSpecificProperty{
+					Name:  "aws/geolocation-country-code",
+					Value: "JP",
+				},
+			},
+		},
+		&endpoint.Endpoint{
 			DNSName:          "a.test",
 			Targets:          []string{internalProxySvc.Status.LoadBalancer.Ingress[0].IP, internalProxySvc.Status.LoadBalancer.Ingress[1].IP, internalProxySvc.Status.LoadBalancer.Ingress[2].IP},
 			RecordType:       endpoint.RecordTypeA,
@@ -291,28 +313,6 @@ func TestGlooSource(t *testing.T) {
 				endpoint.ProviderSpecificProperty{
 					Name:  "aws/geolocation-country-code",
 					Value: "LU",
-				},
-			},
-		},
-		&endpoint.Endpoint{
-			DNSName:          "d.test",
-			Targets:          []string{externalProxySvc.Status.LoadBalancer.Ingress[0].Hostname, externalProxySvc.Status.LoadBalancer.Ingress[1].Hostname, externalProxySvc.Status.LoadBalancer.Ingress[2].Hostname},
-			RecordType:       endpoint.RecordTypeCNAME,
-			RecordTTL:        0,
-			Labels:           endpoint.Labels{},
-			ProviderSpecific: endpoint.ProviderSpecific{},
-		},
-		&endpoint.Endpoint{
-			DNSName:       "e.test",
-			Targets:       []string{externalProxySvc.Status.LoadBalancer.Ingress[0].Hostname, externalProxySvc.Status.LoadBalancer.Ingress[1].Hostname, externalProxySvc.Status.LoadBalancer.Ingress[2].Hostname},
-			RecordType:    endpoint.RecordTypeCNAME,
-			SetIdentifier: "identifier-external",
-			RecordTTL:     24,
-			Labels:        endpoint.Labels{},
-			ProviderSpecific: endpoint.ProviderSpecific{
-				endpoint.ProviderSpecificProperty{
-					Name:  "aws/geolocation-country-code",
-					Value: "JP",
 				},
 			},
 		},

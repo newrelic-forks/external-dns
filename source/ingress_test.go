@@ -25,7 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/api/extensions/v1beta1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
@@ -38,7 +38,7 @@ var _ Source = &ingressSource{}
 type IngressSuite struct {
 	suite.Suite
 	sc             Source
-	fooWithTargets *v1beta1.Ingress
+	fooWithTargets *networkingv1.Ingress
 }
 
 func (suite *IngressSuite) SetupTest() {
@@ -64,7 +64,7 @@ func (suite *IngressSuite) SetupTest() {
 		hostnames:   []string{"v1"},
 		annotations: map[string]string{ALBDualstackAnnotationKey: ALBDualstackAnnotationValue},
 	}).Ingress()
-	_, err = fakeClient.ExtensionsV1beta1().Ingresses(suite.fooWithTargets.Namespace).Create(context.Background(), suite.fooWithTargets, metav1.CreateOptions{})
+	_, err = fakeClient.NetworkingV1().Ingresses(suite.fooWithTargets.Namespace).Create(context.Background(), suite.fooWithTargets, metav1.CreateOptions{})
 	suite.NoError(err, "should succeed")
 }
 
@@ -1031,7 +1031,7 @@ func testIngressEndpoints(t *testing.T) {
 		},
 	} {
 		t.Run(ti.title, func(t *testing.T) {
-			ingresses := make([]*v1beta1.Ingress, 0)
+			ingresses := make([]*networkingv1.Ingress, 0)
 			for _, item := range ti.ingressItems {
 				ingresses = append(ingresses, item.Ingress())
 			}
@@ -1047,7 +1047,7 @@ func testIngressEndpoints(t *testing.T) {
 				ti.ignoreIngressTLSSpec,
 			)
 			for _, ingress := range ingresses {
-				_, err := fakeClient.ExtensionsV1beta1().Ingresses(ingress.Namespace).Create(context.Background(), ingress, metav1.CreateOptions{})
+				_, err := fakeClient.NetworkingV1().Ingresses(ingress.Namespace).Create(context.Background(), ingress, metav1.CreateOptions{})
 				require.NoError(t, err)
 			}
 
@@ -1098,29 +1098,29 @@ type fakeIngress struct {
 	annotations map[string]string
 }
 
-func (ing fakeIngress) Ingress() *v1beta1.Ingress {
-	ingress := &v1beta1.Ingress{
+func (ing fakeIngress) Ingress() *networkingv1.Ingress {
+	ingress := &networkingv1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace:   ing.namespace,
 			Name:        ing.name,
 			Annotations: ing.annotations,
 		},
-		Spec: v1beta1.IngressSpec{
-			Rules: []v1beta1.IngressRule{},
+		Spec: networkingv1.IngressSpec{
+			Rules: []networkingv1.IngressRule{},
 		},
-		Status: v1beta1.IngressStatus{
+		Status: networkingv1.IngressStatus{
 			LoadBalancer: v1.LoadBalancerStatus{
 				Ingress: []v1.LoadBalancerIngress{},
 			},
 		},
 	}
 	for _, dnsname := range ing.dnsnames {
-		ingress.Spec.Rules = append(ingress.Spec.Rules, v1beta1.IngressRule{
+		ingress.Spec.Rules = append(ingress.Spec.Rules, networkingv1.IngressRule{
 			Host: dnsname,
 		})
 	}
 	for _, hosts := range ing.tlsdnsnames {
-		ingress.Spec.TLS = append(ingress.Spec.TLS, v1beta1.IngressTLS{
+		ingress.Spec.TLS = append(ingress.Spec.TLS, networkingv1.IngressTLS{
 			Hosts: hosts,
 		})
 	}
