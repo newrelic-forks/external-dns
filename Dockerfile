@@ -25,9 +25,9 @@ RUN go mod download
 
 COPY . .
 
-FROM alpine:3.17
+FROM alpine:3.18
 
-RUN apk update && apk add "libcrypto3>=3.0.8-r1" "libssl3>=3.0.8-r1" && rm -rf /var/cache/apt/*
+RUN apk update && apk add "libcrypto3>=3.1.7-r1" "libssl3>=3.1.7-r1" && rm -rf /var/cache/apt/*
 
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /sigs.k8s.io/external-dns/build/external-dns /bin/external-dns
