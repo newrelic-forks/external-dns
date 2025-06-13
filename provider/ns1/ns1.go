@@ -247,8 +247,6 @@ func (p *NS1Provider) ns1SubmitChanges(changes []*ns1Change) error {
 				err = withRetries(func() (*http.Response, error) {
 					return p.client.UpdateRecord(record)
 				})
-			default:
-				return fmt.Errorf("unsupported action: %s", change.Action)
 			}
 
 			if err != nil {
