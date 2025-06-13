@@ -20,9 +20,11 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"math/rand"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	api "gopkg.in/ns1/ns1-go.v2/rest"
@@ -42,6 +44,10 @@ const (
 	ns1Update = "UPDATE"
 	// ns1DefaultTTL is the default ttl for ttls that are not set
 	ns1DefaultTTL = 10
+	// maxRetries is the number of retries for rate limited requests
+	maxRetries = 5
+	// initialBackoff is the initial backoff duration for rate limited requests
+	initialBackoff = 1 * time.Second
 )
 
 // NS1DomainClient is a subset of the NS1 API the the provider uses, to ease testing
@@ -227,22 +233,26 @@ func (p *NS1Provider) ns1SubmitChanges(changes []*ns1Change) error {
 				continue
 			}
 
+			var err error
 			switch change.Action {
 			case ns1Create:
-				_, err := p.client.CreateRecord(record)
-				if err != nil {
-					return err
-				}
+				err = withRetries(func() (*http.Response, error) {
+					return p.client.CreateRecord(record)
+				})
 			case ns1Delete:
-				_, err := p.client.DeleteRecord(zoneName, record.Domain, record.Type)
-				if err != nil {
-					return err
-				}
+				err = withRetries(func() (*http.Response, error) {
+					return p.client.DeleteRecord(zoneName, record.Domain, record.Type)
+				})
 			case ns1Update:
-				_, err := p.client.UpdateRecord(record)
-				if err != nil {
-					return err
-				}
+				err = withRetries(func() (*http.Response, error) {
+					return p.client.UpdateRecord(record)
+				})
+			default:
+				return fmt.Errorf("unsupported action: %s", change.Action)
+			}
+
+			if err != nil {
+				return fmt.Errorf("failed to %s record %s in zone %s: %w", change.Action, record.Domain, zoneName, err)
 			}
 		}
 	}
@@ -322,4 +332,36 @@ func ns1ChangesByZone(zones []*dns.Zone, changeSets []*ns1Change) map[string][]*
 	}
 
 	return changes
+}
+
+// withRetries executes a function with exponential backoff for handling rate limiting.
+func withRetries(fn func() (*http.Response, error)) error {
+	var lastErr error
+	backoff := initialBackoff
+
+	for i := 0; i < maxRetries; i++ {
+		resp, err := fn()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+
+		// The ns1-go client doesn't expose the status code in a typed error, so we inspect the response and error string.
+		if resp != nil && resp.StatusCode == http.StatusTooManyRequests {
+			// Add jitter to the backoff to prevent thundering herd.
+			jitter := time.Duration(rand.Intn(100)) * time.Millisecond
+			sleepDuration := backoff + jitter
+
+			log.Warnf("NS1 API rate limit exceeded. Retrying in %v (attempt %d/%d).", sleepDuration, i+1, maxRetries)
+			time.Sleep(sleepDuration)
+
+			backoff *= 2
+			continue
+		}
+
+		// Return immediately for non-rate-limit errors.
+		return err
+	}
+
+	return fmt.Errorf("failed after %d attempts, last error: %w", maxRetries, lastErr)
 }
