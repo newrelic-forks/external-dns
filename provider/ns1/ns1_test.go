@@ -318,3 +318,61 @@ func TestNewNS1ChangesByZone(t *testing.T) {
 	assert.Len(t, changes["bar.com"], 1)
 	assert.Len(t, changes["foo.com"], 3)
 }
+
+// MockNS1RateLimitAndRetry is a mock client that fails on the first attempt
+// and succeeds on the second to test the retry logic.
+type MockNS1RateLimitAndRetry struct {
+	createAttempts int
+}
+
+func (m *MockNS1RateLimitAndRetry) CreateRecord(r *dns.Record) (*http.Response, error) {
+	m.createAttempts++
+	if m.createAttempts == 1 {
+		// Fail on the first attempt
+		return &http.Response{StatusCode: http.StatusTooManyRequests}, fmt.Errorf("rate limit exceeded")
+	}
+	// Succeed on the second attempt
+	return nil, nil
+}
+
+func (m *MockNS1RateLimitAndRetry) DeleteRecord(zone string, domain string, t string) (*http.Response, error) {
+	return nil, nil
+}
+
+func (m *MockNS1RateLimitAndRetry) UpdateRecord(r *dns.Record) (*http.Response, error) {
+	return nil, nil
+}
+
+func (m *MockNS1RateLimitAndRetry) GetZone(zone string) (*dns.Zone, *http.Response, error) {
+	return &dns.Zone{}, nil, nil
+}
+
+func (m *MockNS1RateLimitAndRetry) ListZones() ([]*dns.Zone, *http.Response, error) {
+	zones := []*dns.Zone{
+		{Zone: "foo.com", ID: "12345678910111213141516a"},
+	}
+	return zones, nil, nil
+}
+
+// TestNS1ApplyChangesRateLimitRetry tests that the provider retries on a rate limit error and eventually succeeds.
+func TestNS1ApplyChangesRateLimitRetry(t *testing.T) {
+	// Use our stateful mock that fails once, then succeeds.
+	mockClient := &MockNS1RateLimitAndRetry{}
+	provider := &NS1Provider{
+		client: mockClient,
+	}
+
+	// Define a change to be created.
+	changes := &plan.Changes{
+		Create: []*endpoint.Endpoint{
+			{DNSName: "new.foo.com", Targets: endpoint.Targets{"target"}},
+		},
+	}
+
+	// Apply the changes. The call should succeed because of the retry logic.
+	err := provider.ApplyChanges(context.Background(), changes)
+	require.NoError(t, err, "ApplyChanges should succeed after a retry")
+
+	// Assert that the mock's CreateRecord method was called exactly twice.
+	assert.Equal(t, 2, mockClient.createAttempts, "CreateRecord should be called twice (1 fail + 1 success)")
+}
