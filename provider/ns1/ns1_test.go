@@ -338,17 +338,26 @@ func TestNewNS1ChangesByZone(t *testing.T) {
 // MockNS1RateLimitAndRetry is a mock client that fails on the first attempt
 // and succeeds on the second to test the retry logic.
 type MockNS1RateLimitAndRetry struct {
-	createAttempts int
+	createAttempts  int
+	alwaysRateLimit bool
 }
 
 func (m *MockNS1RateLimitAndRetry) CreateRecord(r *dns.Record) (*http.Response, error) {
 	m.createAttempts++
+
+	// Cover the expected rate limit case in TestNS1ApplyChangesRateLimitExceeded.
+	if m.alwaysRateLimit {
+		return &http.Response{StatusCode: http.StatusTooManyRequests}, fmt.Errorf("rate limit exceeded after exceeding retries")
+	}
+
+	// Cover the number of attempts to create a record in TestNS1ApplyChangesRateLimitRetry.
 	if m.createAttempts == 1 {
 		// Fail on the first attempt
 		return &http.Response{StatusCode: http.StatusTooManyRequests}, fmt.Errorf("rate limit exceeded")
 	}
-	// Succeed on the second attempt
-	return nil, nil
+
+	// Succeed eentually
+	return &http.Response{StatusCode: http.StatusOK}, nil
 }
 
 func (m *MockNS1RateLimitAndRetry) DeleteRecord(zone string, domain string, t string) (*http.Response, error) {
@@ -395,4 +404,33 @@ func TestNS1ApplyChangesRateLimitRetry(t *testing.T) {
 
 	// Assert that the mock's CreateRecord method was called exactly twice.
 	assert.Equal(t, 2, mockClient.createAttempts, "CreateRecord should be called twice (1 fail + 1 success)")
+}
+
+// TestNS1ApplyChangesRateLimitExceeded tests that the provider returns an error after exceeding the maximum number of retries.
+func TestNS1ApplyChangesRateLimitExceeded(t *testing.T) {
+	// Use our stateful mock that always fails.
+	mockClient := &MockNS1RateLimitAndRetry{
+		alwaysRateLimit: true,
+	}
+	provider := &NS1Provider{
+		client: mockClient,
+		// Tune retry parameters for the test
+		maxRetries:     3,
+		initialBackoff: 1 * time.Millisecond,
+		maxBackoff:     2 * time.Millisecond,
+	}
+
+	// Define a change to be created.
+	changes := &plan.Changes{
+		Create: []*endpoint.Endpoint{
+			{DNSName: "new.foo.com", Targets: endpoint.Targets{"target"}},
+		},
+	}
+
+	// Apply the changes. The call should fail because of the retry logic.
+	err := provider.ApplyChanges(context.Background(), changes)
+	require.Error(t, err, "ApplyChanges should fail after exceeding max retries")
+
+	// Assert that the mock's CreateRecord method was called exactly maxRetries.
+	assert.Equal(t, provider.maxRetries, mockClient.createAttempts, "CreateRecord should be called maxRetries times")
 }
