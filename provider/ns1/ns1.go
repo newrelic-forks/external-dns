@@ -48,6 +48,10 @@ const (
 	maxRetries = 5
 	// initialBackoff is the initial backoff duration for rate limited requests
 	initialBackoff = 1 * time.Second
+	// maxBackoff is the maximum backoff duration for rate limited requests.
+	// The backoff will double each time until it reaches this value.
+	// Added in order to prevent excessive delays in case of persistent rate limiting.
+	maxBackoff = 10 * time.Second
 )
 
 // NS1DomainClient is a subset of the NS1 API the the provider uses, to ease testing
@@ -354,6 +358,10 @@ func withRetries(fn func() (*http.Response, error)) error {
 			time.Sleep(sleepDuration)
 
 			backoff *= 2
+			// As a safeguard, we cap the backoff to prevent excessive delays.
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
 			continue
 		}
 
