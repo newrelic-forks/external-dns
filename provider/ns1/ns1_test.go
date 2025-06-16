@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -129,10 +130,13 @@ func (m *MockNS1ListZonesFail) ListZones() ([]*dns.Zone, *http.Response, error) 
 
 func TestNS1Records(t *testing.T) {
 	provider := &NS1Provider{
-		client:        &MockNS1DomainClient{},
-		domainFilter:  endpoint.NewDomainFilter([]string{"foo.com."}),
-		zoneIDFilter:  provider.NewZoneIDFilter([]string{""}),
-		minTTLSeconds: 3600,
+		client:         &MockNS1DomainClient{},
+		domainFilter:   endpoint.NewDomainFilter([]string{"foo.com."}),
+		zoneIDFilter:   provider.NewZoneIDFilter([]string{""}),
+		minTTLSeconds:  3600,
+		maxRetries:     maxRetries,
+		initialBackoff: initialBackoff,
+		maxBackoff:     maxBackoff,
 	}
 	ctx := context.Background()
 
@@ -166,9 +170,12 @@ func TestNewNS1Provider(t *testing.T) {
 
 func TestNS1Zones(t *testing.T) {
 	provider := &NS1Provider{
-		client:       &MockNS1DomainClient{},
-		domainFilter: endpoint.NewDomainFilter([]string{"foo.com."}),
-		zoneIDFilter: provider.NewZoneIDFilter([]string{""}),
+		client:         &MockNS1DomainClient{},
+		domainFilter:   endpoint.NewDomainFilter([]string{"foo.com."}),
+		zoneIDFilter:   provider.NewZoneIDFilter([]string{""}),
+		maxRetries:     maxRetries,
+		initialBackoff: initialBackoff,
+		maxBackoff:     maxBackoff,
 	}
 
 	zones, err := provider.zonesFiltered()
@@ -198,10 +205,13 @@ func TestNS1BuildRecord(t *testing.T) {
 	}
 
 	provider := &NS1Provider{
-		client:        &MockNS1DomainClient{},
-		domainFilter:  endpoint.NewDomainFilter([]string{"foo.com."}),
-		zoneIDFilter:  provider.NewZoneIDFilter([]string{""}),
-		minTTLSeconds: 300,
+		client:         &MockNS1DomainClient{},
+		domainFilter:   endpoint.NewDomainFilter([]string{"foo.com."}),
+		zoneIDFilter:   provider.NewZoneIDFilter([]string{""}),
+		minTTLSeconds:  300,
+		maxRetries:     maxRetries,
+		initialBackoff: initialBackoff,
+		maxBackoff:     maxBackoff,
 	}
 
 	record := provider.ns1BuildRecord("foo.com", change)
@@ -227,7 +237,10 @@ func TestNS1BuildRecord(t *testing.T) {
 func TestNS1ApplyChanges(t *testing.T) {
 	changes := &plan.Changes{}
 	provider := &NS1Provider{
-		client: &MockNS1DomainClient{},
+		client:         &MockNS1DomainClient{},
+		maxRetries:     maxRetries,
+		initialBackoff: initialBackoff,
+		maxBackoff:     maxBackoff,
 	}
 	changes.Create = []*endpoint.Endpoint{
 		{DNSName: "new.foo.com", Targets: endpoint.Targets{"target"}},
@@ -276,7 +289,10 @@ func TestNewNS1Changes(t *testing.T) {
 
 func TestNewNS1ChangesByZone(t *testing.T) {
 	provider := &NS1Provider{
-		client: &MockNS1DomainClient{},
+		client:         &MockNS1DomainClient{},
+		maxRetries:     maxRetries,
+		initialBackoff: initialBackoff,
+		maxBackoff:     maxBackoff,
 	}
 	zones, _ := provider.zonesFiltered()
 	changeSets := []*ns1Change{
@@ -360,6 +376,10 @@ func TestNS1ApplyChangesRateLimitRetry(t *testing.T) {
 	mockClient := &MockNS1RateLimitAndRetry{}
 	provider := &NS1Provider{
 		client: mockClient,
+		// Tune retry parameters for the test
+		maxRetries:     5,
+		initialBackoff: 1 * time.Second,
+		maxBackoff:     3 * time.Second,
 	}
 
 	// Define a change to be created.

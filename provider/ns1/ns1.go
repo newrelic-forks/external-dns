@@ -106,11 +106,14 @@ type NS1Config struct {
 // NS1Provider is the NS1 provider
 type NS1Provider struct {
 	provider.BaseProvider
-	client        NS1DomainClient
-	domainFilter  endpoint.DomainFilter
-	zoneIDFilter  provider.ZoneIDFilter
-	dryRun        bool
-	minTTLSeconds int
+	client         NS1DomainClient
+	domainFilter   endpoint.DomainFilter
+	zoneIDFilter   provider.ZoneIDFilter
+	dryRun         bool
+	minTTLSeconds  int
+	maxRetries     int
+	initialBackoff time.Duration
+	maxBackoff     time.Duration
 }
 
 // NewNS1Provider creates a new NS1 Provider
@@ -147,10 +150,13 @@ func newNS1ProviderWithHTTPClient(config NS1Config, client *http.Client) (*NS1Pr
 	apiClient := api.NewClient(client, clientArgs...)
 
 	provider := &NS1Provider{
-		client:        NS1DomainService{apiClient},
-		domainFilter:  config.DomainFilter,
-		zoneIDFilter:  config.ZoneIDFilter,
-		minTTLSeconds: config.MinTTLSeconds,
+		client:         NS1DomainService{apiClient},
+		domainFilter:   config.DomainFilter,
+		zoneIDFilter:   config.ZoneIDFilter,
+		minTTLSeconds:  config.MinTTLSeconds,
+		maxRetries:     maxRetries,
+		initialBackoff: initialBackoff,
+		maxBackoff:     maxBackoff,
 	}
 	return provider, nil
 }
@@ -240,17 +246,19 @@ func (p *NS1Provider) ns1SubmitChanges(changes []*ns1Change) error {
 			var err error
 			switch change.Action {
 			case ns1Create:
-				err = withRetries(func() (*http.Response, error) {
+				_, err = withRetries(func() (*http.Response, error) {
 					return p.client.CreateRecord(record)
-				})
+				}, p.maxRetries, p.initialBackoff, p.maxBackoff)
 			case ns1Delete:
-				err = withRetries(func() (*http.Response, error) {
+				_, err = withRetries(func() (*http.Response, error) {
 					return p.client.DeleteRecord(zoneName, record.Domain, record.Type)
-				})
+				}, p.maxRetries, p.initialBackoff, p.maxBackoff)
 			case ns1Update:
-				err = withRetries(func() (*http.Response, error) {
+				_, err = withRetries(func() (*http.Response, error) {
 					return p.client.UpdateRecord(record)
-				})
+				}, p.maxRetries, p.initialBackoff, p.maxBackoff)
+			default:
+				return fmt.Errorf("unsupported action: %s", change.Action)
 			}
 
 			if err != nil {
@@ -337,14 +345,20 @@ func ns1ChangesByZone(zones []*dns.Zone, changeSets []*ns1Change) map[string][]*
 }
 
 // withRetries executes a function with exponential backoff for handling rate limiting.
-func withRetries(fn func() (*http.Response, error)) error {
+// Accepts maxRetries, initialBackoff, and maxBackoff as input parameters.
+func withRetries(
+	fn func() (*http.Response, error),
+	maxRetries int,
+	initialBackoff time.Duration,
+	maxBackoff time.Duration,
+) (*http.Response, error) {
 	var lastErr error
 	backoff := initialBackoff
 
 	for i := 0; i < maxRetries; i++ {
 		resp, err := fn()
 		if err == nil {
-			return nil
+			return resp, nil
 		}
 		lastErr = err
 
@@ -366,8 +380,8 @@ func withRetries(fn func() (*http.Response, error)) error {
 		}
 
 		// Return immediately for non-rate-limit errors.
-		return err
+		return resp, err
 	}
 
-	return fmt.Errorf("failed after %d attempts, last error: %w", maxRetries, lastErr)
+	return nil, fmt.Errorf("failed after %d attempts, last error: %w", maxRetries, lastErr)
 }
