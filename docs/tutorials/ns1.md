@@ -184,6 +184,8 @@ The TTL annotation can be used to configure the TTL on DNS records managed by Ex
 
 ExternalDNS uses the hostname annotation to determine which services should be registered with DNS. Removing the hostname annotation will cause ExternalDNS to remove the corresponding DNS records.
 
+**Note:** The NS1 provider now includes built-in handling for API rate limiting. If the NS1 API returns a "429 Too Many Requests" response, ExternalDNS will automatically retry the operation. This improves reliability when managing DNS records under heavy usage or automation.
+
 ### Create the deployment and service
 
 ```
@@ -195,6 +197,8 @@ Depending on where you run your service, it may take some time for your cloud pr
 ## Verifying NS1 DNS records
 
 Use the NS1 portal or API to verify that the A record for your domain shows the external IP address of the services.
+
+If you experience temporary delays in DNS record updates, it may be due to NS1 API rate limiting. ExternalDNS will retry automatically, and changes should be applied once the rate limit is lifted.
 
 ## Cleanup
 
