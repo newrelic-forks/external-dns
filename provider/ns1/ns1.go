@@ -23,11 +23,13 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
+
+	"github.com/hashicorp/go-retryablehttp"
 
 	log "github.com/sirupsen/logrus"
 	api "gopkg.in/ns1/ns1-go.v2/rest"
 	"gopkg.in/ns1/ns1-go.v2/rest/model/dns"
-
 	"sigs.k8s.io/external-dns/endpoint"
 	"sigs.k8s.io/external-dns/plan"
 	"sigs.k8s.io/external-dns/provider"
@@ -42,6 +44,12 @@ const (
 	ns1Update = "UPDATE"
 	// defaultTTL is the default ttl for ttls that are not set
 	defaultTTL = 10
+	// ns1DefaultTTL is the default ttl for ttls that are not set
+	ns1DefaultTTL = 10
+	// maxRetries is the number of retries for rate limited requests
+	maxRetries = 5
+	// maxBackoff is the maximum backoff duration for rate limited requests.
+	maxBackoff = 10 * time.Second
 )
 
 // NS1DomainClient is a subset of the NS1 API the provider uses, to ease testing
@@ -105,7 +113,11 @@ type NS1Provider struct {
 
 // NewNS1Provider creates a new NS1 Provider
 func NewNS1Provider(config NS1Config) (*NS1Provider, error) {
-	return newNS1ProviderWithHTTPClient(config, http.DefaultClient)
+	retryClient := retryablehttp.NewClient()
+	retryClient.RetryMax = maxRetries
+	retryClient.RetryWaitMax = maxBackoff
+	standardClient := retryClient.StandardClient() // *http.Client
+	return newNS1ProviderWithHTTPClient(config, standardClient)
 }
 
 func newNS1ProviderWithHTTPClient(config NS1Config, client *http.Client) (*NS1Provider, error) {
@@ -154,7 +166,7 @@ func (p *NS1Provider) Records(ctx context.Context) ([]*endpoint.Endpoint, error)
 	var endpoints []*endpoint.Endpoint
 
 	for _, zone := range zones {
-		// TODO handle Header Codes
+		// Any HTTP error causes a retry using the retryablehttp client.
 		zoneData, _, err := p.client.GetZone(zone.String())
 		if err != nil {
 			return nil, err
@@ -226,22 +238,20 @@ func (p *NS1Provider) ns1SubmitChanges(changes []*ns1Change) error {
 				continue
 			}
 
+			var err error
 			switch change.Action {
 			case ns1Create:
-				_, err := p.client.CreateRecord(record)
-				if err != nil {
-					return err
-				}
+				_, err = p.client.CreateRecord(record)
 			case ns1Delete:
-				_, err := p.client.DeleteRecord(zoneName, record.Domain, record.Type)
-				if err != nil {
-					return err
-				}
+				_, err = p.client.DeleteRecord(zoneName, record.Domain, record.Type)
 			case ns1Update:
-				_, err := p.client.UpdateRecord(record)
-				if err != nil {
-					return err
-				}
+				_, err = p.client.UpdateRecord(record)
+			default:
+				return fmt.Errorf("unsupported action: %s", change.Action)
+			}
+
+			if err != nil {
+				return fmt.Errorf("failed to %s record %s in zone %s: %w", change.Action, record.Domain, zoneName, err)
 			}
 		}
 	}
@@ -250,10 +260,10 @@ func (p *NS1Provider) ns1SubmitChanges(changes []*ns1Change) error {
 
 // Zones returns the list of hosted zones.
 func (p *NS1Provider) zonesFiltered() ([]*dns.Zone, error) {
-	// TODO handle Header Codes
+	// Any HTTP error causes a retry using the retryablehttp client.
 	zones, _, err := p.client.ListZones()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NS1 ListZones failed with error: %w", err)
 	}
 
 	var toReturn []*dns.Zone
