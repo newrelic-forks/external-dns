@@ -272,7 +272,13 @@ func (p *NS1Provider) ns1SubmitChanges(changes []*ns1Change) error {
 // Zones returns the list of hosted zones.
 func (p *NS1Provider) zonesFiltered() ([]*dns.Zone, error) {
 	// TODO handle Header Codes
-	zones, _, err := p.client.ListZones()
+	zones := []*dns.Zone{}
+	_, err := withRetries(func() (*http.Response, error) {
+		var apiErr error
+		var r *http.Response
+		zones, r, apiErr = p.client.ListZones()
+		return r, apiErr
+	}, p.maxRetries, p.initialBackoff, p.maxBackoff)
 	if err != nil {
 		return nil, err
 	}
