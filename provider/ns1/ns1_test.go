@@ -434,3 +434,92 @@ func TestNS1ApplyChangesRateLimitExceeded(t *testing.T) {
 	// Assert that the mock's CreateRecord method was called exactly maxRetries.
 	assert.Equal(t, provider.maxRetries, mockClient.createAttempts, "CreateRecord should be called maxRetries times")
 }
+
+// MockNS1ListZonesRateLimit simulates ListZones rate limiting and retry logic.
+type MockNS1ListZonesRateLimit struct {
+	attempts        int
+	alwaysRateLimit bool
+}
+
+func (m *MockNS1ListZonesRateLimit) CreateRecord(r *dns.Record) (*http.Response, error) {
+	return nil, nil
+}
+
+func (m *MockNS1ListZonesRateLimit) DeleteRecord(zone string, domain string, t string) (*http.Response, error) {
+	return nil, nil
+}
+
+func (m *MockNS1ListZonesRateLimit) UpdateRecord(r *dns.Record) (*http.Response, error) {
+	return nil, nil
+}
+
+func (m *MockNS1ListZonesRateLimit) GetZone(zone string) (*dns.Zone, *http.Response, error) {
+	return &dns.Zone{}, nil, nil
+}
+
+func (m *MockNS1ListZonesRateLimit) ListZones() ([]*dns.Zone, *http.Response, error) {
+	m.attempts++
+	if m.alwaysRateLimit {
+		return nil, &http.Response{StatusCode: http.StatusTooManyRequests}, fmt.Errorf("rate limit exceeded")
+	}
+	if m.attempts == 1 {
+		return nil, &http.Response{StatusCode: http.StatusTooManyRequests}, fmt.Errorf("rate limit exceeded")
+	}
+	zones := []*dns.Zone{
+		{Zone: "foo.com", ID: "12345678910111213141516a"},
+	}
+	return zones, &http.Response{StatusCode: http.StatusOK}, nil
+}
+
+func TestNS1ZonesFilteredRateLimitRetry(t *testing.T) {
+	mockClient := &MockNS1ListZonesRateLimit{}
+	provider := &NS1Provider{
+		client:         mockClient,
+		maxRetries:     3,
+		initialBackoff: 1 * time.Millisecond,
+		maxBackoff:     2 * time.Millisecond,
+		domainFilter:   endpoint.NewDomainFilter([]string{"foo.com."}),
+		zoneIDFilter:   provider.NewZoneIDFilter([]string{""}),
+	}
+	zones, err := provider.zonesFiltered()
+	require.NoError(t, err, "zonesFiltered should succeed after a retry")
+	require.Len(t, zones, 1)
+	assert.Equal(t, 2, mockClient.attempts, "ListZones should be called twice (1 fail + 1 success)")
+}
+
+func TestNS1ZonesFilteredRateLimitExceeded(t *testing.T) {
+	mockClient := &MockNS1ListZonesRateLimit{alwaysRateLimit: true}
+	provider := &NS1Provider{
+		client:         mockClient,
+		maxRetries:     2,
+		initialBackoff: 1 * time.Millisecond,
+		maxBackoff:     2 * time.Millisecond,
+		domainFilter:   endpoint.NewDomainFilter([]string{"foo.com."}),
+		zoneIDFilter:   provider.NewZoneIDFilter([]string{""}),
+	}
+	zones, err := provider.zonesFiltered()
+	require.Error(t, err, "zonesFiltered should fail after exceeding max retries")
+	assert.Nil(t, zones)
+	assert.Equal(t, provider.maxRetries, mockClient.attempts, "ListZones should be called maxRetries times")
+}
+
+func TestNS1ZonesFilteredMaxBackoffExceeded(t *testing.T) {
+	mockClient := &MockNS1ListZonesRateLimit{alwaysRateLimit: true}
+	provider := &NS1Provider{
+		client:         mockClient,
+		maxRetries:     2,
+		initialBackoff: 1 * time.Second,
+		maxBackoff:     2 * time.Second,
+		domainFilter:   endpoint.NewDomainFilter([]string{"foo.com."}),
+		zoneIDFilter:   provider.NewZoneIDFilter([]string{""}),
+	}
+	startTime := time.Now()
+	zones, err := provider.zonesFiltered()
+	endTime := time.Now()
+	duration := endTime.Sub(startTime)
+	require.Error(t, err, "zonesFiltered should fail after exceeding max backoff duration")
+	assert.Nil(t, zones)
+	// Considering that we skip the jitter in this test, we can calculate the time like below:
+	// (initialBackoff + jitter=0) * maxRetries = 1 sec * 2 attempts = 2 seconds
+	assert.GreaterOrEqual(t, duration, provider.initialBackoff*time.Duration(provider.maxRetries), "zonesFiltered should take at least initialBackoff*maxRetries")
+}
