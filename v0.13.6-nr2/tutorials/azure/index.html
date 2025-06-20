@@ -586,8 +586,6 @@
         
           
         
-          
-        
       
       
         <label class="md-nav__link" for="__nav_3">
@@ -1728,20 +1726,6 @@
 
             
           
-            
-              
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../webhook-provider/" class="md-nav__link">
-        Webhook provider
-      </a>
-    </li>
-  
-
-            
-          
         </ul>
       </nav>
     </li>
@@ -1820,10 +1804,6 @@
         
           
         
-          
-        
-          
-        
       
       
         <label class="md-nav__link" for="__nav_5">
@@ -1858,36 +1838,8 @@
   
   
     <li class="md-nav__item">
-      <a href="../../sources/gateway/" class="md-nav__link">
-        Gateway
-      </a>
-    </li>
-  
-
-            
-          
-            
-              
-  
-  
-  
-    <li class="md-nav__item">
       <a href="../../sources/ingress/" class="md-nav__link">
         Ingress
-      </a>
-    </li>
-  
-
-            
-          
-            
-              
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../sources/service/" class="md-nav__link">
-        Service
       </a>
     </li>
   
@@ -2575,7 +2527,7 @@ are being run on an orchestration node.</p>
 </ul>
 <p>The Azure DNS provider expects, by default, that the configuration file is at <code>/etc/kubernetes/azure.json</code>.  This can be overridden with the <code>--azure-config-file</code> option when starting ExternalDNS.</p>
 <h2 id="permissions-to-modify-dns-zone">Permissions to modify DNS zone<a class="headerlink" href="#permissions-to-modify-dns-zone" title="Permanent link">&para;</a></h2>
-<p>ExternalDNS needs permissions to make changes to the Azure DNS zone. There are four ways configure the access needed:</p>
+<p>ExternalDNS needs permissions to make changes to the Azure DNS zone. There are three ways configure the access needed:</p>
 <ul>
 <li><a href="#service-principal">Service Principal</a></li>
 <li><a href="#managed-identity-using-aks-kubelet-identity">Managed Identity Using AKS Kubelet Identity</a></li>
@@ -2624,7 +2576,7 @@ are being run on an orchestration node.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>$<span class="w"> </span>kubectl<span class="w"> </span>create<span class="w"> </span>secret<span class="w"> </span>generic<span class="w"> </span>azure-config-file<span class="w"> </span>--namespace<span class="w"> </span><span class="s2">&quot;default&quot;</span><span class="w"> </span>--from-file<span class="w"> </span>/local/path/to/azure.json
 </code></pre></div>
 <h3 id="managed-identity-using-aks-kubelet-identity">Managed identity using AKS Kubelet identity<a class="headerlink" href="#managed-identity-using-aks-kubelet-identity" title="Permanent link">&para;</a></h3>
-<p>The <a href="https://docs.microsoft.com/azure/active-directory/managed-identities-azure-resources/overview">managed identity</a> that is assigned to the underlying node pool in the AKS cluster can be given permissions to access Azure DNS.  Managed identities are essentially a service principal whose lifecycle is managed, such as deleting the AKS cluster will also delete the service principals associated with the AKS cluster.  The managed identity assigned Kubernetes node pool, or specifically the <a href="https://docs.microsoft.com/azure/virtual-machine-scale-sets/overview">VMSS</a>, is called the Kubelet identity.</p>
+<p>The <a href="https://docs.microsoft.com/azure/active-directory/managed-identities-azure-resources/overview">managed identity</a> that is assigned to the underlying node pool in the AKS cluster can be given permissions to access Azure DNS.  Managed identities are essentially a service principal whose lifecycle is managed, such as deleting the AKS cluster will also delete the service principals associated with the AKS cluster.  The managed identity assigned Kuberetes node pool, or specifically the <a href="https://docs.microsoft.com/azure/virtual-machine-scale-sets/overview">VMSS</a>, is called the Kubelet identity.</p>
 <p>The managed identites were previously called MSI (Managed Service Identity) and are enabled by default when creating an AKS cluster.</p>
 <p>Note that permissions granted to this identity will be accessible to all containers running inside the Kubernetes cluster, not just the ExternalDNS container(s).</p>
 <p>For the managed identity, the contents of <code>azure.json</code> should be similar to this:</p>
@@ -2636,16 +2588,16 @@ are being run on an orchestration node.</p>
 <a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a><span class="p">}</span>
 </code></pre></div>
 <h4 id="fetching-the-kubelet-identity">Fetching the Kubelet identity<a class="headerlink" href="#fetching-the-kubelet-identity" title="Permanent link">&para;</a></h4>
-<p>For this process, you will need to get the kubelet identity:</p>
+<p>For this process, you will need to get the kublet identity:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>$<span class="w"> </span><span class="nv">PRINCIPAL_ID</span><span class="o">=</span><span class="k">$(</span>az<span class="w"> </span>aks<span class="w"> </span>show<span class="w"> </span>--resource-group<span class="w"> </span><span class="nv">$CLUSTER_GROUP</span><span class="w"> </span>--name<span class="w"> </span><span class="nv">$CLUSTERNAME</span><span class="w"> </span><span class="se">\</span>
 <a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="w">  </span>--query<span class="w"> </span><span class="s2">&quot;identityProfile.kubeletidentity.objectId&quot;</span><span class="w"> </span>--output<span class="w"> </span>tsv<span class="k">)</span>
 </code></pre></div>
 <h4 id="assign-rights-for-the-kubelet-identity">Assign rights for the Kubelet identity<a class="headerlink" href="#assign-rights-for-the-kubelet-identity" title="Permanent link">&para;</a></h4>
-<p>Grant access to Azure DNS zone for the kubelet identity.</p>
+<p>Grant access to Azure DNS zone for the kublet identity.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>$<span class="w"> </span><span class="nv">AZURE_DNS_ZONE</span><span class="o">=</span><span class="s2">&quot;example.com&quot;</span><span class="w"> </span><span class="c1"># DNS zone name like example.com or sub.example.com</span>
 <a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a>$<span class="w"> </span><span class="nv">AZURE_DNS_ZONE_RESOURCE_GROUP</span><span class="o">=</span><span class="s2">&quot;MyDnsResourceGroup&quot;</span><span class="w"> </span><span class="c1"># resource group where DNS zone is hosted</span>
 <a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a>
-<a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="c1"># fetch DNS id used to grant access to the kubelet identity</span>
+<a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="c1"># fetch DNS id used to grant access to the kublet identity</span>
 <a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a>$<span class="w"> </span><span class="nv">DNS_ID</span><span class="o">=</span><span class="k">$(</span>az<span class="w"> </span>network<span class="w"> </span>dns<span class="w"> </span>zone<span class="w"> </span>show<span class="w"> </span>--name<span class="w"> </span><span class="nv">$AZURE_DNS_ZONE</span><span class="w"> </span><span class="se">\</span>
 <a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a><span class="w">  </span>--resource-group<span class="w"> </span><span class="nv">$AZURE_DNS_ZONE_RESOURCE_GROUP</span><span class="w"> </span>--query<span class="w"> </span><span class="s2">&quot;id&quot;</span><span class="w"> </span>--output<span class="w"> </span>tsv<span class="k">)</span>
 <a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a>
@@ -2730,7 +2682,7 @@ are being run on an orchestration node.</p>
 <a id="__codelineno-18-5" name="__codelineno-18-5" href="#__codelineno-18-5"></a><span class="w">  </span>--cluster-name<span class="w"> </span><span class="si">${</span><span class="nv">AZURE_AKS_CLUSTER_NAME</span><span class="si">}</span><span class="w"> </span>--namespace<span class="w"> </span><span class="s2">&quot;default&quot;</span><span class="w"> </span><span class="se">\</span>
 <a id="__codelineno-18-6" name="__codelineno-18-6" href="#__codelineno-18-6"></a><span class="w">  </span>--name<span class="w"> </span><span class="s2">&quot;external-dns&quot;</span><span class="w"> </span>--identity-resource-id<span class="w"> </span><span class="si">${</span><span class="nv">IDENTITY_RESOURCE_ID</span><span class="si">}</span>
 </code></pre></div>
-<p>This will add something similar to the following resources:</p>
+<p>This will add something similar to the following resouces:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a><span class="nt">apiVersion</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">aadpodidentity.k8s.io/v1</span>
 <a id="__codelineno-19-2" name="__codelineno-19-2" href="#__codelineno-19-2"></a><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">AzureIdentity</span>
 <a id="__codelineno-19-3" name="__codelineno-19-3" href="#__codelineno-19-3"></a><span class="nt">metadata</span><span class="p">:</span>
@@ -2849,7 +2801,7 @@ are being run on an orchestration node.</p>
 <a id="__codelineno-28-3" name="__codelineno-28-3" href="#__codelineno-28-3"></a>$<span class="w"> </span>kubectl<span class="w"> </span>patch<span class="w"> </span>deployment<span class="w"> </span>external-dns<span class="w"> </span>--namespace<span class="w"> </span><span class="s2">&quot;default&quot;</span><span class="w"> </span>--patch<span class="w"> </span><span class="se">\</span>
 <a id="__codelineno-28-4" name="__codelineno-28-4" href="#__codelineno-28-4"></a><span class="w"> </span><span class="s1">&#39;{&quot;spec&quot;: {&quot;template&quot;: {&quot;metadata&quot;: {&quot;labels&quot;: {\&quot;azure.workload.identity/use\&quot;: \&quot;true\&quot;}}}}}&#39;</span>
 </code></pre></div>
-<p>NOTE: it&rsquo;s also possible to specify (or override) ClientID through <code>userAssignedIdentityID</code> field in <code>azure.json</code>.</p>
+<p>NOTE: it&rsquo;s also possible to specify (or override) ClientID through <code>UserAssignedIdentityID</code> field in <code>azure.json</code>.</p>
 <p>NOTE: make sure the pod is restarted whenever you make a configuration change.</p>
 <h2 id="ingress-used-with-externaldns">Ingress used with ExternalDNS<a class="headerlink" href="#ingress-used-with-externaldns" title="Permanent link">&para;</a></h2>
 <p>This deployment assumes that you will be using nginx-ingress. When using nginx-ingress do not deploy it as a Daemon Set. This causes nginx-ingress to write the Cluster IP of the backend pods in the ingress status.loadbalancer.ip property which then has external-dns write the Cluster IP(s) in DNS vs. the nginx-ingress service external IP.</p>
@@ -3138,7 +3090,7 @@ resource group:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-38-1" name="__codelineno-38-1" href="#__codelineno-38-1"></a>$<span class="w"> </span>az<span class="w"> </span>group<span class="w"> </span>delete<span class="w"> </span>--name<span class="w"> </span><span class="s2">&quot;MyDnsResourceGroup&quot;</span>
 </code></pre></div>
 <h2 id="more-tutorials">More tutorials<a class="headerlink" href="#more-tutorials" title="Permanent link">&para;</a></h2>
-<p>A video explanation is available here: https://www.youtube.com/watch?v=VSn6DPKIhM8&amp;list=PLpbcUe4chE79sB7Jg7B4z3HytqUUEwcNE</p>
+<p>A video explanantion is available here: https://www.youtube.com/watch?v=VSn6DPKIhM8&amp;list=PLpbcUe4chE79sB7Jg7B4z3HytqUUEwcNE</p>
 <p><img alt="image" src="https://user-images.githubusercontent.com/6548359/235437721-87611869-75f2-4f32-bb35-9da585e46299.png" /></p>
 
   <hr>
@@ -3146,7 +3098,7 @@ resource group:</p>
   <small>
     
       Last update:
-      <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-date">October 15, 2023</span>
+      <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-date">September 1, 2023</span>
       
     
   </small>

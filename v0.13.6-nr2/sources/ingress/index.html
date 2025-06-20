@@ -584,8 +584,6 @@
         
           
         
-          
-        
       
       
         <label class="md-nav__link" for="__nav_3">
@@ -1384,20 +1382,6 @@
 
             
           
-            
-              
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../tutorials/webhook-provider/" class="md-nav__link">
-        Webhook provider
-      </a>
-    </li>
-  
-
-            
-          
         </ul>
       </nav>
     </li>
@@ -1478,10 +1462,6 @@
         
           
         
-          
-        
-          
-        
       
       
         <label class="md-nav__link" for="__nav_5">
@@ -1504,20 +1484,6 @@
     <li class="md-nav__item">
       <a href="../sources/" class="md-nav__link">
         About
-      </a>
-    </li>
-  
-
-            
-          
-            
-              
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../gateway/" class="md-nav__link">
-        Gateway
       </a>
     </li>
   
@@ -1588,20 +1554,6 @@
   
 </nav>
       
-    </li>
-  
-
-            
-          
-            
-              
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../service/" class="md-nav__link">
-        Service
-      </a>
     </li>
   
 
@@ -1972,32 +1924,32 @@ allow multiple ingress classes.</p>
 by a set of labels.</p>
 <h2 id="domain-names">Domain names<a class="headerlink" href="#domain-names" title="Permanent link">&para;</a></h2>
 <p>The domain names of the DNS entries created from an Ingress are sourced from the following places:</p>
-<ol>
+<ul>
 <li>Iterates over the Ingress&rsquo;s <code>spec.rules</code>, adding any non-empty <code>host</code>.</li>
-</ol>
+</ul>
 <p>This behavior is suppressed if the <code>--ignore-ingress-rules-spec</code> flag was specified<br />
 or the Ingress had an<br />
 <code>external-dns.alpha.kubernetes.io/ingress-hostname-source: annotation-only</code> annotation. </p>
-<ol start="2">
+<ul>
 <li>Iterates over the Ingress&rsquo;s <code>spec.tls</code>, adding each member of <code>hosts</code>.</li>
-</ol>
+</ul>
 <p>This behavior is suppressed if the <code>--ignore-ingress-tls-spec</code> flag was specified<br />
 or the Ingress had an<br />
 <code>external-dns.alpha.kubernetes.io/ingress-hostname-source: annotation-only</code> annotation, </p>
-<ol start="3">
+<ul>
 <li>Adds the hostnames from any <code>external-dns.alpha.kubernetes.io/hostname</code> annotation.</li>
-</ol>
+</ul>
 <p>This behavior is suppressed if the <code>--ignore-hostname-annotation</code> flag was specified<br />
 or the Ingress had an<br />
 <code>external-dns.alpha.kubernetes.io/ingress-hostname-source: defined-hosts-only</code> annotation.</p>
-<ol start="4">
-<li>If no DNS entries were produced for an Ingress by the previous steps<br />
+<ul>
+<li>If no endpoints were produced for an Ingress by the previous steps<br />
 or the <code>--combine-fqdn-annotation</code> flag was specified, then adds hostnames<br />
 generated from any<code>--fqdn-template</code> flag.</li>
-</ol>
+</ul>
 <h2 id="targets">Targets<a class="headerlink" href="#targets" title="Permanent link">&para;</a></h2>
 <p>The targets of the DNS entries created from an Ingress are sourced from the following places:</p>
-<ol>
+<ul>
 <li>
 <p>If the Ingress has an <code>external-dns.alpha.kubernetes.io/target</code> annotation, uses <br />
 the values from that. </p>
@@ -2006,14 +1958,14 @@ the values from that. </p>
 <p>Otherwise, iterates over the Ingress&rsquo;s <code>status.loadBalancer.ingress</code>, <br />
 adding each non-empty <code>ip</code> and <code>hostname</code>. </p>
 </li>
-</ol>
+</ul>
 
   <hr>
 <div class="md-source-file">
   <small>
     
       Last update:
-      <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-date">September 7, 2023</span>
+      <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-date">July 5, 2023</span>
       
     
   </small>
@@ -2036,7 +1988,7 @@ adding each non-empty <code>ip</code> and <code>hostname</code>. </p>
     <nav class="md-footer__inner md-grid" aria-label="Footer">
       
         
-        <a href="../gateway/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Gateway" rel="prev">
+        <a href="../sources/" class="md-footer__link md-footer__link--prev" aria-label="Previous: About" rel="prev">
           <div class="md-footer__button md-icon">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11h12z"/></svg>
           </div>
@@ -2045,20 +1997,20 @@ adding each non-empty <code>ip</code> and <code>hostname</code>. </p>
               <span class="md-footer__direction">
                 Previous
               </span>
-              Gateway
+              About
             </div>
           </div>
         </a>
       
       
         
-        <a href="../service/" class="md-footer__link md-footer__link--next" aria-label="Next: Service" rel="next">
+        <a href="../../registry/registry/" class="md-footer__link md-footer__link--next" aria-label="Next: About" rel="next">
           <div class="md-footer__title">
             <div class="md-ellipsis">
               <span class="md-footer__direction">
                 Next
               </span>
-              Service
+              About
             </div>
           </div>
           <div class="md-footer__button md-icon">
