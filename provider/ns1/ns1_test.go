@@ -502,3 +502,24 @@ func TestNS1ZonesFilteredRateLimitExceeded(t *testing.T) {
 	assert.Nil(t, zones)
 	assert.Equal(t, provider.maxRetries, mockClient.attempts, "ListZones should be called maxRetries times")
 }
+
+func TestNS1ZonesFilteredMaxBackoffExceeded(t *testing.T) {
+	mockClient := &MockNS1ListZonesRateLimit{alwaysRateLimit: true}
+	provider := &NS1Provider{
+		client:         mockClient,
+		maxRetries:     2,
+		initialBackoff: 1 * time.Second,
+		maxBackoff:     2 * time.Second,
+		domainFilter:   endpoint.NewDomainFilter([]string{"foo.com."}),
+		zoneIDFilter:   provider.NewZoneIDFilter([]string{""}),
+	}
+	startTime := time.Now()
+	zones, err := provider.zonesFiltered()
+	endTime := time.Now()
+	duration := endTime.Sub(startTime)
+	require.Error(t, err, "zonesFiltered should fail after exceeding max backoff duration")
+	assert.Nil(t, zones)
+	// Considering that we skip the jitter in this test, we can calculate the time like below:
+	// (initialBackoff + jitter=0) * maxRetries = 1 sec * 2 attempts = 2 seconds
+	assert.GreaterOrEqual(t, duration, provider.initialBackoff*time.Duration(provider.maxRetries), "zonesFiltered should take at least initialBackoff*maxRetries")
+}
