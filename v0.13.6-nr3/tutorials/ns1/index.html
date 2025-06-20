@@ -2212,12 +2212,14 @@ var <code>NS1_APIKEY</code> will be needed to run ExternalDNS with NS1.</p>
 <p>Verify that the annotation on the service uses the same hostname as the NS1 DNS zone created above. The annotation may also be a subdomain of the DNS zone (e.g. &lsquo;www.example.com&rsquo;).</p>
 <p>The TTL annotation can be used to configure the TTL on DNS records managed by ExternalDNS and is optional. If this annotation is not set, the TTL on records managed by ExternalDNS will default to 10.</p>
 <p>ExternalDNS uses the hostname annotation to determine which services should be registered with DNS. Removing the hostname annotation will cause ExternalDNS to remove the corresponding DNS records.</p>
+<p><strong>Note:</strong> The NS1 provider now includes built-in handling for API rate limiting. If the NS1 API returns a &ldquo;429 Too Many Requests&rdquo; response, ExternalDNS will automatically retry the operation. This improves reliability when managing DNS records under heavy usage or automation.</p>
 <h3 id="create-the-deployment-and-service">Create the deployment and service<a class="headerlink" href="#create-the-deployment-and-service" title="Permanent link">&para;</a></h3>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>$ kubectl create -f nginx.yaml
 </code></pre></div>
 <p>Depending on where you run your service, it may take some time for your cloud provider to create an external IP for the service. Once an external IP is assigned, ExternalDNS detects the new service IP address and synchronizes the NS1 DNS records.</p>
 <h2 id="verifying-ns1-dns-records">Verifying NS1 DNS records<a class="headerlink" href="#verifying-ns1-dns-records" title="Permanent link">&para;</a></h2>
 <p>Use the NS1 portal or API to verify that the A record for your domain shows the external IP address of the services.</p>
+<p>If you experience temporary delays in DNS record updates, it may be due to NS1 API rate limiting. ExternalDNS will retry automatically, and changes should be applied once the rate limit is lifted.</p>
 <h2 id="cleanup">Cleanup<a class="headerlink" href="#cleanup" title="Permanent link">&para;</a></h2>
 <p>Once you successfully configure and verify record management via ExternalDNS, you can delete the tutorial&rsquo;s example:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>$ kubectl delete -f nginx.yaml
@@ -2229,7 +2231,7 @@ var <code>NS1_APIKEY</code> will be needed to run ExternalDNS with NS1.</p>
   <small>
     
       Last update:
-      <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-date">May 29, 2023</span>
+      <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-date">June 18, 2025</span>
       
     
   </small>
