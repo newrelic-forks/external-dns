@@ -46,11 +46,7 @@ const (
 	ns1DefaultTTL = 10
 	// maxRetries is the number of retries for rate limited requests
 	maxRetries = 5
-	// initialBackoff is the initial backoff duration for rate limited requests
-	initialBackoff = 1 * time.Second
 	// maxBackoff is the maximum backoff duration for rate limited requests.
-	// The backoff will double each time until it reaches this value.
-	// Added in order to prevent excessive delays in case of persistent rate limiting.
 	maxBackoff = 10 * time.Second
 )
 
@@ -106,14 +102,11 @@ type NS1Config struct {
 // NS1Provider is the NS1 provider
 type NS1Provider struct {
 	provider.BaseProvider
-	client         NS1DomainClient
-	domainFilter   endpoint.DomainFilter
-	zoneIDFilter   provider.ZoneIDFilter
-	dryRun         bool
-	minTTLSeconds  int
-	maxRetries     int
-	initialBackoff time.Duration
-	maxBackoff     time.Duration
+	client        NS1DomainClient
+	domainFilter  endpoint.DomainFilter
+	zoneIDFilter  provider.ZoneIDFilter
+	dryRun        bool
+	minTTLSeconds int
 }
 
 // NewNS1Provider creates a new NS1 Provider
@@ -154,13 +147,10 @@ func newNS1ProviderWithHTTPClient(config NS1Config, client *http.Client) (*NS1Pr
 	apiClient := api.NewClient(client, clientArgs...)
 
 	provider := &NS1Provider{
-		client:         NS1DomainService{apiClient},
-		domainFilter:   config.DomainFilter,
-		zoneIDFilter:   config.ZoneIDFilter,
-		minTTLSeconds:  config.MinTTLSeconds,
-		maxRetries:     maxRetries,
-		initialBackoff: initialBackoff,
-		maxBackoff:     maxBackoff,
+		client:        NS1DomainService{apiClient},
+		domainFilter:  config.DomainFilter,
+		zoneIDFilter:  config.ZoneIDFilter,
+		minTTLSeconds: config.MinTTLSeconds,
 	}
 	return provider, nil
 }

@@ -129,13 +129,10 @@ func (m *MockNS1ListZonesFail) ListZones() ([]*dns.Zone, *http.Response, error) 
 
 func TestNS1Records(t *testing.T) {
 	provider := &NS1Provider{
-		client:         &MockNS1DomainClient{},
-		domainFilter:   endpoint.NewDomainFilter([]string{"foo.com."}),
-		zoneIDFilter:   provider.NewZoneIDFilter([]string{""}),
-		minTTLSeconds:  3600,
-		maxRetries:     maxRetries,
-		initialBackoff: initialBackoff,
-		maxBackoff:     maxBackoff,
+		client:        &MockNS1DomainClient{},
+		domainFilter:  endpoint.NewDomainFilter([]string{"foo.com."}),
+		zoneIDFilter:  provider.NewZoneIDFilter([]string{""}),
+		minTTLSeconds: 3600,
 	}
 	ctx := context.Background()
 
@@ -169,12 +166,9 @@ func TestNewNS1Provider(t *testing.T) {
 
 func TestNS1Zones(t *testing.T) {
 	provider := &NS1Provider{
-		client:         &MockNS1DomainClient{},
-		domainFilter:   endpoint.NewDomainFilter([]string{"foo.com."}),
-		zoneIDFilter:   provider.NewZoneIDFilter([]string{""}),
-		maxRetries:     maxRetries,
-		initialBackoff: initialBackoff,
-		maxBackoff:     maxBackoff,
+		client:       &MockNS1DomainClient{},
+		domainFilter: endpoint.NewDomainFilter([]string{"foo.com."}),
+		zoneIDFilter: provider.NewZoneIDFilter([]string{""}),
 	}
 
 	zones, err := provider.zonesFiltered()
@@ -204,13 +198,10 @@ func TestNS1BuildRecord(t *testing.T) {
 	}
 
 	provider := &NS1Provider{
-		client:         &MockNS1DomainClient{},
-		domainFilter:   endpoint.NewDomainFilter([]string{"foo.com."}),
-		zoneIDFilter:   provider.NewZoneIDFilter([]string{""}),
-		minTTLSeconds:  300,
-		maxRetries:     maxRetries,
-		initialBackoff: initialBackoff,
-		maxBackoff:     maxBackoff,
+		client:        &MockNS1DomainClient{},
+		domainFilter:  endpoint.NewDomainFilter([]string{"foo.com."}),
+		zoneIDFilter:  provider.NewZoneIDFilter([]string{""}),
+		minTTLSeconds: 300,
 	}
 
 	record := provider.ns1BuildRecord("foo.com", change)
@@ -236,10 +227,7 @@ func TestNS1BuildRecord(t *testing.T) {
 func TestNS1ApplyChanges(t *testing.T) {
 	changes := &plan.Changes{}
 	provider := &NS1Provider{
-		client:         &MockNS1DomainClient{},
-		maxRetries:     maxRetries,
-		initialBackoff: initialBackoff,
-		maxBackoff:     maxBackoff,
+		client: &MockNS1DomainClient{},
 	}
 	changes.Create = []*endpoint.Endpoint{
 		{DNSName: "new.foo.com", Targets: endpoint.Targets{"target"}},
@@ -288,10 +276,7 @@ func TestNewNS1Changes(t *testing.T) {
 
 func TestNewNS1ChangesByZone(t *testing.T) {
 	provider := &NS1Provider{
-		client:         &MockNS1DomainClient{},
-		maxRetries:     maxRetries,
-		initialBackoff: initialBackoff,
-		maxBackoff:     maxBackoff,
+		client: &MockNS1DomainClient{},
 	}
 	zones, _ := provider.zonesFiltered()
 	changeSets := []*ns1Change{
