@@ -26,10 +26,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hashicorp/go-retryablehttp"
+
 	log "github.com/sirupsen/logrus"
 	api "gopkg.in/ns1/ns1-go.v2/rest"
 	"gopkg.in/ns1/ns1-go.v2/rest/model/dns"
-
 	"sigs.k8s.io/external-dns/endpoint"
 	"sigs.k8s.io/external-dns/plan"
 	"sigs.k8s.io/external-dns/provider"
@@ -118,7 +119,11 @@ type NS1Provider struct {
 
 // NewNS1Provider creates a new NS1 Provider
 func NewNS1Provider(config NS1Config) (*NS1Provider, error) {
-	return newNS1ProviderWithHTTPClient(config, http.DefaultClient)
+	retryClient := retryablehttp.NewClient()
+	retryClient.RetryMax = maxRetries
+	retryClient.RetryWaitMax = maxBackoff
+	standardClient := retryClient.StandardClient() // *http.Client
+	return newNS1ProviderWithHTTPClient(config, standardClient)
 }
 
 func newNS1ProviderWithHTTPClient(config NS1Config, client *http.Client) (*NS1Provider, error) {
