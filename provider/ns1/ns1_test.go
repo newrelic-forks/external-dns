@@ -523,3 +523,104 @@ func TestNS1ZonesFilteredMaxBackoffExceeded(t *testing.T) {
 	// (initialBackoff + jitter=0) * maxRetries = 1 sec * 2 attempts = 2 seconds
 	assert.GreaterOrEqual(t, duration, provider.initialBackoff*time.Duration(provider.maxRetries), "zonesFiltered should take at least initialBackoff*maxRetries")
 }
+
+// MockNS1GetZoneRateLimit simulates rate limiting and retry logic for GetZone.
+type MockNS1GetZoneRateLimit struct {
+	attempts        int
+	alwaysRateLimit bool
+}
+
+func (m *MockNS1GetZoneRateLimit) CreateRecord(r *dns.Record) (*http.Response, error) {
+	return nil, nil
+}
+
+func (m *MockNS1GetZoneRateLimit) DeleteRecord(zone string, domain string, t string) (*http.Response, error) {
+	return nil, nil
+}
+
+func (m *MockNS1GetZoneRateLimit) UpdateRecord(r *dns.Record) (*http.Response, error) {
+	return nil, nil
+}
+
+func (m *MockNS1GetZoneRateLimit) GetZone(zone string) (*dns.Zone, *http.Response, error) {
+	m.attempts++
+	if m.alwaysRateLimit {
+		return nil, &http.Response{StatusCode: http.StatusTooManyRequests}, fmt.Errorf("rate limit exceeded")
+	}
+	if m.attempts == 1 {
+		return nil, &http.Response{StatusCode: http.StatusTooManyRequests}, fmt.Errorf("rate limit exceeded")
+	}
+	return &dns.Zone{Zone: zone}, &http.Response{StatusCode: http.StatusOK}, nil
+}
+
+func (m *MockNS1GetZoneRateLimit) ListZones() ([]*dns.Zone, *http.Response, error) {
+	return []*dns.Zone{{Zone: "foo.com"}}, nil, nil
+}
+
+// TestNS1GetZoneRetryLogic tests that GetZone is retried on 429 and eventually succeeds.
+func TestNS1GetZoneRetryLogic(t *testing.T) {
+	mockClient := &MockNS1GetZoneRateLimit{}
+	provider := &NS1Provider{
+		client:         mockClient,
+		maxRetries:     3,
+		initialBackoff: 1 * time.Millisecond,
+		maxBackoff:     2 * time.Millisecond,
+	}
+	zoneName := "foo.com"
+	var zoneData *dns.Zone
+	_, err := withRetries(func() (*http.Response, error) {
+		var apiErr error
+		var resp *http.Response
+		zoneData, resp, apiErr = provider.client.GetZone(zoneName)
+		return resp, apiErr
+	}, provider.maxRetries, provider.initialBackoff, provider.maxBackoff)
+	require.NoError(t, err, "GetZone should succeed after a retry")
+	require.NotNil(t, zoneData)
+	assert.Equal(t, 2, mockClient.attempts, "GetZone should be called twice (1 fail + 1 success)")
+}
+
+// TestNS1GetZoneRetryLogicExceeded tests that GetZone returns error after exceeding retries.
+func TestNS1GetZoneRetryLogicExceeded(t *testing.T) {
+	mockClient := &MockNS1GetZoneRateLimit{alwaysRateLimit: true}
+	provider := &NS1Provider{
+		client:         mockClient,
+		maxRetries:     2,
+		initialBackoff: 1 * time.Millisecond,
+		maxBackoff:     2 * time.Millisecond,
+	}
+	zoneName := "foo.com"
+	var zoneData *dns.Zone
+	_, err := withRetries(func() (*http.Response, error) {
+		var apiErr error
+		var resp *http.Response
+		zoneData, resp, apiErr = provider.client.GetZone(zoneName)
+		return resp, apiErr
+	}, provider.maxRetries, provider.initialBackoff, provider.maxBackoff)
+	require.Error(t, err, "GetZone should fail after exceeding max retries")
+	assert.Nil(t, zoneData)
+	assert.Equal(t, provider.maxRetries, mockClient.attempts, "GetZone should be called maxRetries times")
+}
+
+func TestNS1GetZoneMaxBackoffExceeded(t *testing.T) {
+	mockClient := &MockNS1GetZoneRateLimit{alwaysRateLimit: true}
+	provider := &NS1Provider{
+		client:         mockClient,
+		maxRetries:     2,
+		initialBackoff: 1 * time.Second,
+		maxBackoff:     2 * time.Second,
+	}
+	zoneName := "foo.com"
+	var zoneData *dns.Zone
+	startTime := time.Now()
+	_, err := withRetries(func() (*http.Response, error) {
+		var apiErr error
+		var resp *http.Response
+		zoneData, resp, apiErr = provider.client.GetZone(zoneName)
+		return resp, apiErr
+	}, provider.maxRetries, provider.initialBackoff, provider.maxBackoff)
+	endTime := time.Now()
+	duration := endTime.Sub(startTime)
+	require.Error(t, err, "GetZone should fail after exceeding max backoff duration")
+	assert.Nil(t, zoneData)
+	assert.GreaterOrEqual(t, duration, provider.initialBackoff*time.Duration(provider.maxRetries), "GetZone should take at least initialBackoff*maxRetries")
+}
