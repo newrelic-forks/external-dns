@@ -20,16 +20,16 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"math/rand"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/hashicorp/go-retryablehttp"
+
 	log "github.com/sirupsen/logrus"
 	api "gopkg.in/ns1/ns1-go.v2/rest"
 	"gopkg.in/ns1/ns1-go.v2/rest/model/dns"
-
 	"sigs.k8s.io/external-dns/endpoint"
 	"sigs.k8s.io/external-dns/plan"
 	"sigs.k8s.io/external-dns/provider"
@@ -48,11 +48,7 @@ const (
 	ns1DefaultTTL = 10
 	// maxRetries is the number of retries for rate limited requests
 	maxRetries = 5
-	// initialBackoff is the initial backoff duration for rate limited requests
-	initialBackoff = 1 * time.Second
 	// maxBackoff is the maximum backoff duration for rate limited requests.
-	// The backoff will double each time until it reaches this value.
-	// Added in order to prevent excessive delays in case of persistent rate limiting.
 	maxBackoff = 10 * time.Second
 )
 
@@ -108,19 +104,20 @@ type NS1Config struct {
 // NS1Provider is the NS1 provider
 type NS1Provider struct {
 	provider.BaseProvider
-	client         NS1DomainClient
-	domainFilter   *endpoint.DomainFilter
-	zoneIDFilter   provider.ZoneIDFilter
-	dryRun         bool
-	minTTLSeconds  int
-	maxRetries     int
-	initialBackoff time.Duration
-	maxBackoff     time.Duration
+	client        NS1DomainClient
+	domainFilter  endpoint.DomainFilter
+	zoneIDFilter  provider.ZoneIDFilter
+	dryRun        bool
+	minTTLSeconds int
 }
 
 // NewNS1Provider creates a new NS1 Provider
 func NewNS1Provider(config NS1Config) (*NS1Provider, error) {
-	return newNS1ProviderWithHTTPClient(config, http.DefaultClient)
+	retryClient := retryablehttp.NewClient()
+	retryClient.RetryMax = maxRetries
+	retryClient.RetryWaitMax = maxBackoff
+	standardClient := retryClient.StandardClient() // *http.Client
+	return newNS1ProviderWithHTTPClient(config, standardClient)
 }
 
 func newNS1ProviderWithHTTPClient(config NS1Config, client *http.Client) (*NS1Provider, error) {
@@ -151,15 +148,13 @@ func newNS1ProviderWithHTTPClient(config NS1Config, client *http.Client) (*NS1Pr
 
 	apiClient := api.NewClient(client, clientArgs...)
 
-	return &NS1Provider{
-		client:         NS1DomainService{apiClient},
-		domainFilter:   config.DomainFilter,
-		zoneIDFilter:   config.ZoneIDFilter,
-		minTTLSeconds:  config.MinTTLSeconds,
-		maxRetries:     maxRetries,
-		initialBackoff: initialBackoff,
-		maxBackoff:     maxBackoff,
-	}, nil
+	provider := &NS1Provider{
+		client:        NS1DomainService{apiClient},
+		domainFilter:  config.DomainFilter,
+		zoneIDFilter:  config.ZoneIDFilter,
+		minTTLSeconds: config.MinTTLSeconds,
+	}
+	return provider, nil
 }
 
 // Records returns the endpoints this provider knows about
@@ -172,7 +167,7 @@ func (p *NS1Provider) Records(ctx context.Context) ([]*endpoint.Endpoint, error)
 	var endpoints []*endpoint.Endpoint
 
 	for _, zone := range zones {
-		// TODO handle Header Codes
+		// Any HTTP error causes a retry using the retryablehttp client.
 		zoneData, _, err := p.client.GetZone(zone.String())
 		if err != nil {
 			return nil, err
@@ -247,17 +242,11 @@ func (p *NS1Provider) ns1SubmitChanges(changes []*ns1Change) error {
 			var err error
 			switch change.Action {
 			case ns1Create:
-				_, err = withRetries(func() (*http.Response, error) {
-					return p.client.CreateRecord(record)
-				}, p.maxRetries, p.initialBackoff, p.maxBackoff)
+				_, err = p.client.CreateRecord(record)
 			case ns1Delete:
-				_, err = withRetries(func() (*http.Response, error) {
-					return p.client.DeleteRecord(zoneName, record.Domain, record.Type)
-				}, p.maxRetries, p.initialBackoff, p.maxBackoff)
+				_, err = p.client.DeleteRecord(zoneName, record.Domain, record.Type)
 			case ns1Update:
-				_, err = withRetries(func() (*http.Response, error) {
-					return p.client.UpdateRecord(record)
-				}, p.maxRetries, p.initialBackoff, p.maxBackoff)
+				_, err = p.client.UpdateRecord(record)
 			default:
 				return fmt.Errorf("unsupported action: %s", change.Action)
 			}
@@ -272,16 +261,10 @@ func (p *NS1Provider) ns1SubmitChanges(changes []*ns1Change) error {
 
 // Zones returns the list of hosted zones.
 func (p *NS1Provider) zonesFiltered() ([]*dns.Zone, error) {
-	// TODO handle Header Codes
-	zones := []*dns.Zone{}
-	_, err := withRetries(func() (*http.Response, error) {
-		var apiErr error
-		var r *http.Response
-		zones, r, apiErr = p.client.ListZones()
-		return r, apiErr
-	}, p.maxRetries, p.initialBackoff, p.maxBackoff)
+	// Any HTTP error causes a retry using the retryablehttp client.
+	zones, _, err := p.client.ListZones()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NS1 ListZones failed with error: %w", err)
 	}
 
 	var toReturn []*dns.Zone
@@ -349,46 +332,4 @@ func ns1ChangesByZone(zones []*dns.Zone, changeSets []*ns1Change) map[string][]*
 	}
 
 	return changes
-}
-
-// withRetries executes a function with exponential backoff for handling rate limiting.
-// Accepts maxRetries, initialBackoff, and maxBackoff as input parameters.
-func withRetries(
-	fn func() (*http.Response, error),
-	maxRetries int,
-	initialBackoff time.Duration,
-	maxBackoff time.Duration,
-) (*http.Response, error) {
-	var lastErr error
-	backoff := initialBackoff
-
-	for i := 0; i < maxRetries; i++ {
-		resp, err := fn()
-		if err == nil {
-			return resp, nil
-		}
-		lastErr = err
-
-		// The ns1-go client doesn't expose the status code in a typed error, so we inspect the response and error string.
-		if resp != nil && resp.StatusCode == http.StatusTooManyRequests {
-			// Add jitter to the backoff to prevent thundering herd.
-			jitter := time.Duration(rand.Intn(100)) * time.Millisecond
-			sleepDuration := backoff + jitter
-
-			log.Warnf("NS1 API rate limit exceeded. Retrying in %v (attempt %d/%d).", sleepDuration, i+1, maxRetries)
-			time.Sleep(sleepDuration)
-
-			backoff *= 2
-			// As a safeguard, we cap the backoff to prevent excessive delays.
-			if backoff > maxBackoff {
-				backoff = maxBackoff
-			}
-			continue
-		}
-
-		// Return immediately for non-rate-limit errors.
-		return resp, err
-	}
-
-	return nil, fmt.Errorf("failed after %d attempts, last error: %w", maxRetries, lastErr)
 }
