@@ -20,7 +20,6 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"math/rand"
 	"net/http"
 	"os"
 	"strings"
@@ -176,14 +175,8 @@ func (p *NS1Provider) Records(ctx context.Context) ([]*endpoint.Endpoint, error)
 	var endpoints []*endpoint.Endpoint
 
 	for _, zone := range zones {
-		// TODO handle Header Codes
-		var zoneData *dns.Zone
-		_, err := withRetries(func() (*http.Response, error) {
-			var apiErr error
-			var resp *http.Response
-			zoneData, resp, apiErr = p.client.GetZone(zone.String())
-			return resp, apiErr
-		}, p.maxRetries, p.initialBackoff, p.maxBackoff)
+		// Any HTTP error causes a retry using the retryablehttp client.
+		zoneData, _, err := p.client.GetZone(zone.String())
 		if err != nil {
 			return nil, err
 		}
@@ -257,17 +250,11 @@ func (p *NS1Provider) ns1SubmitChanges(changes []*ns1Change) error {
 			var err error
 			switch change.Action {
 			case ns1Create:
-				_, err = withRetries(func() (*http.Response, error) {
-					return p.client.CreateRecord(record)
-				}, p.maxRetries, p.initialBackoff, p.maxBackoff)
+				_, err = p.client.CreateRecord(record)
 			case ns1Delete:
-				_, err = withRetries(func() (*http.Response, error) {
-					return p.client.DeleteRecord(zoneName, record.Domain, record.Type)
-				}, p.maxRetries, p.initialBackoff, p.maxBackoff)
+				_, err = p.client.DeleteRecord(zoneName, record.Domain, record.Type)
 			case ns1Update:
-				_, err = withRetries(func() (*http.Response, error) {
-					return p.client.UpdateRecord(record)
-				}, p.maxRetries, p.initialBackoff, p.maxBackoff)
+				_, err = p.client.UpdateRecord(record)
 			default:
 				return fmt.Errorf("unsupported action: %s", change.Action)
 			}
@@ -282,16 +269,10 @@ func (p *NS1Provider) ns1SubmitChanges(changes []*ns1Change) error {
 
 // Zones returns the list of hosted zones.
 func (p *NS1Provider) zonesFiltered() ([]*dns.Zone, error) {
-	// TODO handle Header Codes
-	zones := []*dns.Zone{}
-	_, err := withRetries(func() (*http.Response, error) {
-		var apiErr error
-		var r *http.Response
-		zones, r, apiErr = p.client.ListZones()
-		return r, apiErr
-	}, p.maxRetries, p.initialBackoff, p.maxBackoff)
+	// Any HTTP error causes a retry using the retryablehttp client.
+	zones, _, err := p.client.ListZones()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NS1 ListZones failed with error: %w", err)
 	}
 
 	toReturn := []*dns.Zone{}
@@ -359,46 +340,4 @@ func ns1ChangesByZone(zones []*dns.Zone, changeSets []*ns1Change) map[string][]*
 	}
 
 	return changes
-}
-
-// withRetries executes a function with exponential backoff for handling rate limiting.
-// Accepts maxRetries, initialBackoff, and maxBackoff as input parameters.
-func withRetries(
-	fn func() (*http.Response, error),
-	maxRetries int,
-	initialBackoff time.Duration,
-	maxBackoff time.Duration,
-) (*http.Response, error) {
-	var lastErr error
-	backoff := initialBackoff
-
-	for i := 0; i < maxRetries; i++ {
-		resp, err := fn()
-		if err == nil {
-			return resp, nil
-		}
-		lastErr = err
-
-		// The ns1-go client doesn't expose the status code in a typed error, so we inspect the response and error string.
-		if resp != nil && resp.StatusCode == http.StatusTooManyRequests {
-			// Add jitter to the backoff to prevent thundering herd.
-			jitter := time.Duration(rand.Intn(100)) * time.Millisecond
-			sleepDuration := backoff + jitter
-
-			log.Warnf("NS1 API rate limit exceeded. Retrying in %v (attempt %d/%d).", sleepDuration, i+1, maxRetries)
-			time.Sleep(sleepDuration)
-
-			backoff *= 2
-			// As a safeguard, we cap the backoff to prevent excessive delays.
-			if backoff > maxBackoff {
-				backoff = maxBackoff
-			}
-			continue
-		}
-
-		// Return immediately for non-rate-limit errors.
-		return resp, err
-	}
-
-	return nil, fmt.Errorf("failed after %d attempts, last error: %w", maxRetries, lastErr)
 }
