@@ -22,7 +22,6 @@ import (
 	"net/http"
 	"os"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -130,13 +129,10 @@ func (m *MockNS1ListZonesFail) ListZones() ([]*dns.Zone, *http.Response, error) 
 
 func TestNS1Records(t *testing.T) {
 	provider := &NS1Provider{
-		client:         &MockNS1DomainClient{},
-		domainFilter:   endpoint.NewDomainFilter([]string{"foo.com."}),
-		zoneIDFilter:   provider.NewZoneIDFilter([]string{""}),
-		minTTLSeconds:  3600,
-		maxRetries:     maxRetries,
-		initialBackoff: initialBackoff,
-		maxBackoff:     maxBackoff,
+		client:        &MockNS1DomainClient{},
+		domainFilter:  endpoint.NewDomainFilter([]string{"foo.com."}),
+		zoneIDFilter:  provider.NewZoneIDFilter([]string{""}),
+		minTTLSeconds: 3600,
 	}
 	ctx := context.Background()
 
@@ -170,12 +166,9 @@ func TestNewNS1Provider(t *testing.T) {
 
 func TestNS1Zones(t *testing.T) {
 	provider := &NS1Provider{
-		client:         &MockNS1DomainClient{},
-		domainFilter:   endpoint.NewDomainFilter([]string{"foo.com."}),
-		zoneIDFilter:   provider.NewZoneIDFilter([]string{""}),
-		maxRetries:     maxRetries,
-		initialBackoff: initialBackoff,
-		maxBackoff:     maxBackoff,
+		client:       &MockNS1DomainClient{},
+		domainFilter: endpoint.NewDomainFilter([]string{"foo.com."}),
+		zoneIDFilter: provider.NewZoneIDFilter([]string{""}),
 	}
 
 	zones, err := provider.zonesFiltered()
@@ -205,13 +198,10 @@ func TestNS1BuildRecord(t *testing.T) {
 	}
 
 	provider := &NS1Provider{
-		client:         &MockNS1DomainClient{},
-		domainFilter:   endpoint.NewDomainFilter([]string{"foo.com."}),
-		zoneIDFilter:   provider.NewZoneIDFilter([]string{""}),
-		minTTLSeconds:  300,
-		maxRetries:     maxRetries,
-		initialBackoff: initialBackoff,
-		maxBackoff:     maxBackoff,
+		client:        &MockNS1DomainClient{},
+		domainFilter:  endpoint.NewDomainFilter([]string{"foo.com."}),
+		zoneIDFilter:  provider.NewZoneIDFilter([]string{""}),
+		minTTLSeconds: 300,
 	}
 
 	record := provider.ns1BuildRecord("foo.com", change)
@@ -237,10 +227,7 @@ func TestNS1BuildRecord(t *testing.T) {
 func TestNS1ApplyChanges(t *testing.T) {
 	changes := &plan.Changes{}
 	provider := &NS1Provider{
-		client:         &MockNS1DomainClient{},
-		maxRetries:     maxRetries,
-		initialBackoff: initialBackoff,
-		maxBackoff:     maxBackoff,
+		client: &MockNS1DomainClient{},
 	}
 	changes.Create = []*endpoint.Endpoint{
 		{DNSName: "new.foo.com", Targets: endpoint.Targets{"target"}},
@@ -289,10 +276,7 @@ func TestNewNS1Changes(t *testing.T) {
 
 func TestNewNS1ChangesByZone(t *testing.T) {
 	provider := &NS1Provider{
-		client:         &MockNS1DomainClient{},
-		maxRetries:     maxRetries,
-		initialBackoff: initialBackoff,
-		maxBackoff:     maxBackoff,
+		client: &MockNS1DomainClient{},
 	}
 	zones, _ := provider.zonesFiltered()
 	changeSets := []*ns1Change{
@@ -333,193 +317,4 @@ func TestNewNS1ChangesByZone(t *testing.T) {
 	changes := ns1ChangesByZone(zones, changeSets)
 	assert.Len(t, changes["bar.com"], 1)
 	assert.Len(t, changes["foo.com"], 3)
-}
-
-// MockNS1RateLimitAndRetry is a mock client that fails on the first attempt
-// and succeeds on the second to test the retry logic.
-type MockNS1RateLimitAndRetry struct {
-	createAttempts  int
-	alwaysRateLimit bool
-}
-
-func (m *MockNS1RateLimitAndRetry) CreateRecord(r *dns.Record) (*http.Response, error) {
-	m.createAttempts++
-
-	// Cover the expected rate limit case in TestNS1ApplyChangesRateLimitExceeded.
-	if m.alwaysRateLimit {
-		return &http.Response{StatusCode: http.StatusTooManyRequests}, fmt.Errorf("rate limit exceeded after exceeding retries")
-	}
-
-	// Cover the number of attempts to create a record in TestNS1ApplyChangesRateLimitRetry.
-	if m.createAttempts == 1 {
-		// Fail on the first attempt
-		return &http.Response{StatusCode: http.StatusTooManyRequests}, fmt.Errorf("rate limit exceeded")
-	}
-
-	// Succeed eentually
-	return &http.Response{StatusCode: http.StatusOK}, nil
-}
-
-func (m *MockNS1RateLimitAndRetry) DeleteRecord(zone string, domain string, t string) (*http.Response, error) {
-	return nil, nil
-}
-
-func (m *MockNS1RateLimitAndRetry) UpdateRecord(r *dns.Record) (*http.Response, error) {
-	return nil, nil
-}
-
-func (m *MockNS1RateLimitAndRetry) GetZone(zone string) (*dns.Zone, *http.Response, error) {
-	return &dns.Zone{}, nil, nil
-}
-
-func (m *MockNS1RateLimitAndRetry) ListZones() ([]*dns.Zone, *http.Response, error) {
-	zones := []*dns.Zone{
-		{Zone: "foo.com", ID: "12345678910111213141516a"},
-	}
-	return zones, nil, nil
-}
-
-// TestNS1ApplyChangesRateLimitRetry tests that the provider retries on a rate limit error and eventually succeeds.
-func TestNS1ApplyChangesRateLimitRetry(t *testing.T) {
-	// Use our stateful mock that fails once, then succeeds.
-	mockClient := &MockNS1RateLimitAndRetry{}
-	provider := &NS1Provider{
-		client: mockClient,
-		// Tune retry parameters for the test
-		maxRetries:     5,
-		initialBackoff: 1 * time.Second,
-		maxBackoff:     3 * time.Second,
-	}
-
-	// Define a change to be created.
-	changes := &plan.Changes{
-		Create: []*endpoint.Endpoint{
-			{DNSName: "new.foo.com", Targets: endpoint.Targets{"target"}},
-		},
-	}
-
-	// Apply the changes. The call should succeed because of the retry logic.
-	err := provider.ApplyChanges(context.Background(), changes)
-	require.NoError(t, err, "ApplyChanges should succeed after a retry")
-
-	// Assert that the mock's CreateRecord method was called exactly twice.
-	assert.Equal(t, 2, mockClient.createAttempts, "CreateRecord should be called twice (1 fail + 1 success)")
-}
-
-// TestNS1ApplyChangesRateLimitExceeded tests that the provider returns an error after exceeding the maximum number of retries.
-func TestNS1ApplyChangesRateLimitExceeded(t *testing.T) {
-	// Use our stateful mock that always fails.
-	mockClient := &MockNS1RateLimitAndRetry{
-		alwaysRateLimit: true,
-	}
-	provider := &NS1Provider{
-		client: mockClient,
-		// Tune retry parameters for the test
-		maxRetries:     3,
-		initialBackoff: 1 * time.Millisecond,
-		maxBackoff:     2 * time.Millisecond,
-	}
-
-	// Define a change to be created.
-	changes := &plan.Changes{
-		Create: []*endpoint.Endpoint{
-			{DNSName: "new.foo.com", Targets: endpoint.Targets{"target"}},
-		},
-	}
-
-	// Apply the changes. The call should fail because of the retry logic.
-	err := provider.ApplyChanges(context.Background(), changes)
-	require.Error(t, err, "ApplyChanges should fail after exceeding max retries")
-
-	// Assert that the mock's CreateRecord method was called exactly maxRetries.
-	assert.Equal(t, provider.maxRetries, mockClient.createAttempts, "CreateRecord should be called maxRetries times")
-}
-
-// MockNS1ListZonesRateLimit simulates ListZones rate limiting and retry logic.
-type MockNS1ListZonesRateLimit struct {
-	attempts        int
-	alwaysRateLimit bool
-}
-
-func (m *MockNS1ListZonesRateLimit) CreateRecord(r *dns.Record) (*http.Response, error) {
-	return nil, nil
-}
-
-func (m *MockNS1ListZonesRateLimit) DeleteRecord(zone string, domain string, t string) (*http.Response, error) {
-	return nil, nil
-}
-
-func (m *MockNS1ListZonesRateLimit) UpdateRecord(r *dns.Record) (*http.Response, error) {
-	return nil, nil
-}
-
-func (m *MockNS1ListZonesRateLimit) GetZone(zone string) (*dns.Zone, *http.Response, error) {
-	return &dns.Zone{}, nil, nil
-}
-
-func (m *MockNS1ListZonesRateLimit) ListZones() ([]*dns.Zone, *http.Response, error) {
-	m.attempts++
-	if m.alwaysRateLimit {
-		return nil, &http.Response{StatusCode: http.StatusTooManyRequests}, fmt.Errorf("rate limit exceeded")
-	}
-	if m.attempts == 1 {
-		return nil, &http.Response{StatusCode: http.StatusTooManyRequests}, fmt.Errorf("rate limit exceeded")
-	}
-	zones := []*dns.Zone{
-		{Zone: "foo.com", ID: "12345678910111213141516a"},
-	}
-	return zones, &http.Response{StatusCode: http.StatusOK}, nil
-}
-
-func TestNS1ZonesFilteredRateLimitRetry(t *testing.T) {
-	mockClient := &MockNS1ListZonesRateLimit{}
-	provider := &NS1Provider{
-		client:         mockClient,
-		maxRetries:     3,
-		initialBackoff: 1 * time.Millisecond,
-		maxBackoff:     2 * time.Millisecond,
-		domainFilter:   endpoint.NewDomainFilter([]string{"foo.com."}),
-		zoneIDFilter:   provider.NewZoneIDFilter([]string{""}),
-	}
-	zones, err := provider.zonesFiltered()
-	require.NoError(t, err, "zonesFiltered should succeed after a retry")
-	require.Len(t, zones, 1)
-	assert.Equal(t, 2, mockClient.attempts, "ListZones should be called twice (1 fail + 1 success)")
-}
-
-func TestNS1ZonesFilteredRateLimitExceeded(t *testing.T) {
-	mockClient := &MockNS1ListZonesRateLimit{alwaysRateLimit: true}
-	provider := &NS1Provider{
-		client:         mockClient,
-		maxRetries:     2,
-		initialBackoff: 1 * time.Millisecond,
-		maxBackoff:     2 * time.Millisecond,
-		domainFilter:   endpoint.NewDomainFilter([]string{"foo.com."}),
-		zoneIDFilter:   provider.NewZoneIDFilter([]string{""}),
-	}
-	zones, err := provider.zonesFiltered()
-	require.Error(t, err, "zonesFiltered should fail after exceeding max retries")
-	assert.Nil(t, zones)
-	assert.Equal(t, provider.maxRetries, mockClient.attempts, "ListZones should be called maxRetries times")
-}
-
-func TestNS1ZonesFilteredMaxBackoffExceeded(t *testing.T) {
-	mockClient := &MockNS1ListZonesRateLimit{alwaysRateLimit: true}
-	provider := &NS1Provider{
-		client:         mockClient,
-		maxRetries:     2,
-		initialBackoff: 1 * time.Second,
-		maxBackoff:     2 * time.Second,
-		domainFilter:   endpoint.NewDomainFilter([]string{"foo.com."}),
-		zoneIDFilter:   provider.NewZoneIDFilter([]string{""}),
-	}
-	startTime := time.Now()
-	zones, err := provider.zonesFiltered()
-	endTime := time.Now()
-	duration := endTime.Sub(startTime)
-	require.Error(t, err, "zonesFiltered should fail after exceeding max backoff duration")
-	assert.Nil(t, zones)
-	// Considering that we skip the jitter in this test, we can calculate the time like below:
-	// (initialBackoff + jitter=0) * maxRetries = 1 sec * 2 attempts = 2 seconds
-	assert.GreaterOrEqual(t, duration, provider.initialBackoff*time.Duration(provider.maxRetries), "zonesFiltered should take at least initialBackoff*maxRetries")
 }
