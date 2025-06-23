@@ -172,7 +172,13 @@ func (p *NS1Provider) Records(ctx context.Context) ([]*endpoint.Endpoint, error)
 
 	for _, zone := range zones {
 		// TODO handle Header Codes
-		zoneData, _, err := p.client.GetZone(zone.String())
+		var zoneData *dns.Zone
+		_, err := withRetries(func() (*http.Response, error) {
+			var apiErr error
+			var resp *http.Response
+			zoneData, resp, apiErr = p.client.GetZone(zone.String())
+			return resp, apiErr
+		}, p.maxRetries, p.initialBackoff, p.maxBackoff)
 		if err != nil {
 			return nil, err
 		}
