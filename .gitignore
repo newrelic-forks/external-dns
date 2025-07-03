@@ -15,6 +15,7 @@
 
 # Vscode files
 .vscode
+__debug_*
 
 # This is where the result of the go build goes
 /output*/
@@ -61,3 +62,5 @@ docs/CONTRIBUTING.md
 docs/index.md
 docs/redirect
 site
+_scratch
+Pipfile

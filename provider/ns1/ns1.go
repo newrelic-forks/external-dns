@@ -42,6 +42,8 @@ const (
 	ns1Delete = "DELETE"
 	// ns1Update is a ChangeAction enum value
 	ns1Update = "UPDATE"
+	// defaultTTL is the default ttl for ttls that are not set
+	defaultTTL = 10
 	// ns1DefaultTTL is the default ttl for ttls that are not set
 	ns1DefaultTTL = 10
 	// maxRetries is the number of retries for rate limited requests
@@ -50,7 +52,7 @@ const (
 	maxBackoff = 10 * time.Second
 )
 
-// NS1DomainClient is a subset of the NS1 API the the provider uses, to ease testing
+// NS1DomainClient is a subset of the NS1 API the provider uses, to ease testing
 type NS1DomainClient interface {
 	CreateRecord(r *dns.Record) (*http.Response, error)
 	DeleteRecord(zone string, domain string, t string) (*http.Response, error)
@@ -91,7 +93,7 @@ func (n NS1DomainService) ListZones() ([]*dns.Zone, *http.Response, error) {
 
 // NS1Config passes cli args to the NS1Provider
 type NS1Config struct {
-	DomainFilter  endpoint.DomainFilter
+	DomainFilter  *endpoint.DomainFilter
 	ZoneIDFilter  provider.ZoneIDFilter
 	NS1Endpoint   string
 	NS1IgnoreSSL  bool
@@ -189,12 +191,12 @@ func (p *NS1Provider) Records(ctx context.Context) ([]*endpoint.Endpoint, error)
 
 // ns1BuildRecord returns a dns.Record for a change set
 func (p *NS1Provider) ns1BuildRecord(zoneName string, change *ns1Change) *dns.Record {
-	record := dns.NewRecord(zoneName, change.Endpoint.DNSName, change.Endpoint.RecordType)
+	record := dns.NewRecord(zoneName, change.Endpoint.DNSName, change.Endpoint.RecordType, map[string]string{}, []string{})
 	for _, v := range change.Endpoint.Targets {
 		record.AddAnswer(dns.NewAnswer(strings.Split(v, " ")))
 	}
 	// set default ttl, but respect minTTLSeconds
-	ttl := ns1DefaultTTL
+	ttl := defaultTTL
 	if p.minTTLSeconds > ttl {
 		ttl = p.minTTLSeconds
 	}
@@ -265,7 +267,7 @@ func (p *NS1Provider) zonesFiltered() ([]*dns.Zone, error) {
 		return nil, fmt.Errorf("NS1 ListZones failed with error: %w", err)
 	}
 
-	toReturn := []*dns.Zone{}
+	var toReturn []*dns.Zone
 
 	for _, z := range zones {
 		if p.domainFilter.Match(z.Zone) && p.zoneIDFilter.Match(z.ID) {
@@ -300,10 +302,10 @@ func (p *NS1Provider) ApplyChanges(ctx context.Context, changes *plan.Changes) e
 func newNS1Changes(action string, endpoints []*endpoint.Endpoint) []*ns1Change {
 	changes := make([]*ns1Change, 0, len(endpoints))
 
-	for _, endpoint := range endpoints {
+	for _, ep := range endpoints {
 		changes = append(changes, &ns1Change{
 			Action:   action,
-			Endpoint: endpoint,
+			Endpoint: ep,
 		},
 		)
 	}

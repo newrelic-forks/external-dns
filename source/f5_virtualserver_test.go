@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	fakeDynamic "k8s.io/client-go/dynamic/fake"
 	fakeKube "k8s.io/client-go/kubernetes/fake"
+
 	"sigs.k8s.io/external-dns/endpoint"
 
 	f5 "github.com/F5Networks/k8s-bigip-ctlr/v2/config/apis/cis/v1"
@@ -45,6 +46,42 @@ func TestF5VirtualServerEndpoints(t *testing.T) {
 		expected         []*endpoint.Endpoint
 	}{
 		{
+			name:             "F5 VirtualServer with target annotation",
+			annotationFilter: "",
+			virtualServer: f5.VirtualServer{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: f5VirtualServerGVR.GroupVersion().String(),
+					Kind:       "VirtualServer",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vs",
+					Namespace: defaultF5VirtualServerNamespace,
+					Annotations: map[string]string{
+						targetAnnotationKey: "192.168.1.150",
+					},
+				},
+				Spec: f5.VirtualServerSpec{
+					Host:                 "www.example.com",
+					VirtualServerAddress: "192.168.1.100",
+				},
+				Status: f5.CustomResourceStatus{
+					VSAddress: "192.168.1.200",
+					Status:    "OK",
+				},
+			},
+			expected: []*endpoint.Endpoint{
+				{
+					DNSName:    "www.example.com",
+					Targets:    []string{"192.168.1.150"},
+					RecordType: endpoint.RecordTypeA,
+					RecordTTL:  0,
+					Labels: endpoint.Labels{
+						"resource": "f5-virtualserver/virtualserver/test-vs",
+					},
+				},
+			},
+		},
+		{
 			name:             "F5 VirtualServer with host and virtualServerAddress set",
 			annotationFilter: "",
 			virtualServer: f5.VirtualServer{
@@ -59,6 +96,10 @@ func TestF5VirtualServerEndpoints(t *testing.T) {
 				Spec: f5.VirtualServerSpec{
 					Host:                 "www.example.com",
 					VirtualServerAddress: "192.168.1.100",
+				},
+				Status: f5.CustomResourceStatus{
+					VSAddress: "192.168.1.200",
+					Status:    "OK",
 				},
 			},
 			expected: []*endpoint.Endpoint{
@@ -88,8 +129,9 @@ func TestF5VirtualServerEndpoints(t *testing.T) {
 				Spec: f5.VirtualServerSpec{
 					Host: "www.example.com",
 				},
-				Status: f5.VirtualServerStatus{
+				Status: f5.CustomResourceStatus{
 					VSAddress: "192.168.1.100",
+					Status:    "OK",
 				},
 			},
 			expected: []*endpoint.Endpoint{
@@ -119,7 +161,7 @@ func TestF5VirtualServerEndpoints(t *testing.T) {
 				Spec: f5.VirtualServerSpec{
 					Host: "www.example.com",
 				},
-				Status: f5.VirtualServerStatus{
+				Status: f5.CustomResourceStatus{
 					VSAddress: "",
 				},
 			},
@@ -143,6 +185,10 @@ func TestF5VirtualServerEndpoints(t *testing.T) {
 				Spec: f5.VirtualServerSpec{
 					Host:                 "www.example.com",
 					VirtualServerAddress: "192.168.1.100",
+				},
+				Status: f5.CustomResourceStatus{
+					VSAddress: "192.168.1.100",
+					Status:    "OK",
 				},
 			},
 			expected: []*endpoint.Endpoint{
@@ -176,6 +222,10 @@ func TestF5VirtualServerEndpoints(t *testing.T) {
 					Host:                 "www.example.com",
 					VirtualServerAddress: "192.168.1.100",
 				},
+				Status: f5.CustomResourceStatus{
+					VSAddress: "192.168.1.100",
+					Status:    "OK",
+				},
 			},
 			expected: nil,
 		},
@@ -197,6 +247,10 @@ func TestF5VirtualServerEndpoints(t *testing.T) {
 					Host:                 "www.example.com",
 					VirtualServerAddress: "192.168.1.100",
 				},
+				Status: f5.CustomResourceStatus{
+					VSAddress: "192.168.1.100",
+					Status:    "OK",
+				},
 			},
 			expected: []*endpoint.Endpoint{
 				{
@@ -210,11 +264,72 @@ func TestF5VirtualServerEndpoints(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "F5 VirtualServer with error status but valid IP",
+			virtualServer: f5.VirtualServer{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: f5VirtualServerGVR.GroupVersion().String(),
+					Kind:       "VirtualServer",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vs",
+					Namespace: defaultF5VirtualServerNamespace,
+					Annotations: map[string]string{
+						"external-dns.alpha.kubernetes.io/ttl": "600",
+					},
+				},
+				Spec: f5.VirtualServerSpec{
+					Host:                 "www.example.com",
+					VirtualServerAddress: "192.168.1.100",
+				},
+				Status: f5.CustomResourceStatus{
+					VSAddress: "192.168.1.100",
+					Status:    "ERROR",
+					Error:     "Some error status message",
+				},
+			},
+			expected: []*endpoint.Endpoint{
+				{
+					DNSName:    "www.example.com",
+					Targets:    []string{"192.168.1.100"},
+					RecordType: endpoint.RecordTypeA,
+					RecordTTL:  600,
+					Labels: endpoint.Labels{
+						"resource": "f5-virtualserver/virtualserver/test-vs",
+					},
+				},
+			},
+		},
+		{
+			name: "F5 VirtualServer with missing IP address and OK status",
+			virtualServer: f5.VirtualServer{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: f5VirtualServerGVR.GroupVersion().String(),
+					Kind:       "VirtualServer",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vs",
+					Namespace: defaultF5VirtualServerNamespace,
+					Annotations: map[string]string{
+						"external-dns.alpha.kubernetes.io/ttl": "600",
+					},
+				},
+				Spec: f5.VirtualServerSpec{
+					Host:      "www.example.com",
+					IPAMLabel: "test",
+				},
+				Status: f5.CustomResourceStatus{
+					VSAddress: "None",
+					Status:    "OK",
+				},
+			},
+			expected: nil,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			fakeKubernetesClient := fakeKube.NewSimpleClientset()
+			fakeKubernetesClient := fakeKube.NewClientset()
 			scheme := runtime.NewScheme()
 			scheme.AddKnownTypes(f5VirtualServerGVR.GroupVersion(), &f5.VirtualServer{}, &f5.VirtualServerList{})
 			fakeDynamicClient := fakeDynamic.NewSimpleDynamicClient(scheme)
@@ -241,7 +356,7 @@ func TestF5VirtualServerEndpoints(t *testing.T) {
 			endpoints, err := source.Endpoints(context.Background())
 			require.NoError(t, err)
 			assert.Len(t, endpoints, len(tc.expected))
-			assert.Equal(t, endpoints, tc.expected)
+			assert.Equal(t, tc.expected, endpoints)
 		})
 	}
 }

@@ -18,9 +18,9 @@ package source
 
 import (
 	"context"
+	"errors"
 	"testing"
 
-	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -46,7 +46,7 @@ type GatewaySuite struct {
 }
 
 func (suite *GatewaySuite) SetupTest() {
-	fakeKubernetesClient := fake.NewSimpleClientset()
+	fakeKubernetesClient := fake.NewClientset()
 	fakeIstioClient := istiofake.NewSimpleClientset()
 	var err error
 
@@ -160,13 +160,13 @@ func TestNewIstioGatewaySource(t *testing.T) {
 			annotationFilter: "kubernetes.io/gateway.class=nginx",
 		},
 	} {
-		ti := ti
+
 		t.Run(ti.title, func(t *testing.T) {
 			t.Parallel()
 
 			_, err := NewIstioGatewaySource(
 				context.TODO(),
-				fake.NewSimpleClientset(),
+				fake.NewClientset(),
 				istiofake.NewSimpleClientset(),
 				"",
 				ti.annotationFilter,
@@ -337,8 +337,9 @@ func testEndpointsFromGatewayConfig(t *testing.T) {
 			title: "no rule.host",
 			lbServices: []fakeIngressGatewayService{
 				{
-					ips:       []string{"8.8.8.8", "127.0.0.1"},
-					hostnames: []string{"elb.com", "alb.com"},
+					ips:         []string{"8.8.8.8", "127.0.0.1"},
+					hostnames:   []string{"elb.com", "alb.com"},
+					externalIPs: []string{"1.1.1.1", "2.2.2.2"},
 				},
 			},
 			config: fakeGatewayConfig{
@@ -350,8 +351,9 @@ func testEndpointsFromGatewayConfig(t *testing.T) {
 			title: "one empty rule.host",
 			lbServices: []fakeIngressGatewayService{
 				{
-					ips:       []string{"8.8.8.8", "127.0.0.1"},
-					hostnames: []string{"elb.com", "alb.com"},
+					ips:         []string{"8.8.8.8", "127.0.0.1"},
+					hostnames:   []string{"elb.com", "alb.com"},
+					externalIPs: []string{"1.1.1.1", "2.2.2.2"},
 				},
 			},
 			config: fakeGatewayConfig{
@@ -447,8 +449,50 @@ func testEndpointsFromGatewayConfig(t *testing.T) {
 				},
 			},
 		},
+		{
+			title: "one rule.host one lb.externalIP",
+			lbServices: []fakeIngressGatewayService{
+				{
+					externalIPs: []string{"8.8.8.8"},
+				},
+			},
+			config: fakeGatewayConfig{
+				dnsnames: [][]string{
+					{"foo.bar"},
+				},
+			},
+			expected: []*endpoint.Endpoint{
+				{
+					DNSName:    "foo.bar",
+					RecordType: endpoint.RecordTypeA,
+					Targets:    endpoint.Targets{"8.8.8.8"},
+				},
+			},
+		},
+		{
+			title: "one rule.host two lb.IP, two lb.Hostname and two lb.externalIP",
+			lbServices: []fakeIngressGatewayService{
+				{
+					ips:         []string{"8.8.8.8", "127.0.0.1"},
+					hostnames:   []string{"elb.com", "alb.com"},
+					externalIPs: []string{"1.1.1.1", "2.2.2.2"},
+				},
+			},
+			config: fakeGatewayConfig{
+				dnsnames: [][]string{
+					{"foo.bar"},
+				},
+			},
+			expected: []*endpoint.Endpoint{
+				{
+					DNSName:    "foo.bar",
+					RecordType: endpoint.RecordTypeA,
+					Targets:    endpoint.Targets{"1.1.1.1", "2.2.2.2"},
+				},
+			},
+		},
 	} {
-		ti := ti
+
 		t.Run(ti.title, func(t *testing.T) {
 			t.Parallel()
 
@@ -1429,7 +1473,7 @@ func testGatewayEndpoints(t *testing.T) {
 			expectError: true,
 		},
 	} {
-		ti := ti
+
 		t.Run(ti.title, func(t *testing.T) {
 			t.Parallel()
 
@@ -1521,11 +1565,12 @@ func newTestGatewaySource(loadBalancerList []fakeIngressGatewayService, ingressL
 }
 
 type fakeIngressGatewayService struct {
-	ips       []string
-	hostnames []string
-	namespace string
-	name      string
-	selector  map[string]string
+	ips         []string
+	hostnames   []string
+	namespace   string
+	name        string
+	selector    map[string]string
+	externalIPs []string
 }
 
 func (ig fakeIngressGatewayService) Service() *v1.Service {
@@ -1540,7 +1585,8 @@ func (ig fakeIngressGatewayService) Service() *v1.Service {
 			},
 		},
 		Spec: v1.ServiceSpec{
-			Selector: ig.selector,
+			Selector:    ig.selector,
+			ExternalIPs: ig.externalIPs,
 		},
 	}
 

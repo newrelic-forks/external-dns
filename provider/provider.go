@@ -18,12 +18,29 @@ package provider
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net"
 	"strings"
 
 	"sigs.k8s.io/external-dns/endpoint"
 	"sigs.k8s.io/external-dns/plan"
 )
+
+// SoftError is an error, that provider will only log as error instead
+// of fatal. It is meant for error propagation from providers to tell
+// that this is a transient error.
+var SoftError error = errors.New("soft error") //nolint:staticcheck
+
+// NewSoftErrorf creates a SoftError with formats according to a format specifier and returns the string as a
+func NewSoftErrorf(format string, a ...any) error {
+	return NewSoftError(fmt.Errorf(format, a...))
+}
+
+// NewSoftError creates a SoftError from the given error
+func NewSoftError(err error) error {
+	return errors.Join(SoftError, err)
+}
 
 // Provider defines the interface DNS providers should implement.
 type Provider interface {
@@ -36,18 +53,18 @@ type Provider interface {
 	// the endpoints that the provider returns in `Records` so that the change plan will not have
 	// unnecessary (potentially failing) changes. It may also modify other fields, add, or remove
 	// Endpoints. It is permitted to modify the supplied endpoints.
-	AdjustEndpoints(endpoints []*endpoint.Endpoint) []*endpoint.Endpoint
-	GetDomainFilter() endpoint.DomainFilter
+	AdjustEndpoints(endpoints []*endpoint.Endpoint) ([]*endpoint.Endpoint, error)
+	GetDomainFilter() endpoint.DomainFilterInterface
 }
 
 type BaseProvider struct{}
 
-func (b BaseProvider) AdjustEndpoints(endpoints []*endpoint.Endpoint) []*endpoint.Endpoint {
-	return endpoints
+func (b BaseProvider) AdjustEndpoints(endpoints []*endpoint.Endpoint) ([]*endpoint.Endpoint, error) {
+	return endpoints, nil
 }
 
-func (b BaseProvider) GetDomainFilter() endpoint.DomainFilter {
-	return endpoint.DomainFilter{}
+func (b BaseProvider) GetDomainFilter() endpoint.DomainFilterInterface {
+	return &endpoint.DomainFilter{}
 }
 
 type contextKey struct {

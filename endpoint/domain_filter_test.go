@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -248,6 +249,26 @@ var domainFilterTests = []domainFilterTest{
 		},
 	},
 	{
+		[]string{"æøå.org"},
+		[]string{"api.æøå.org"},
+		[]string{"foo.api.æøå.org", "api.æøå.org"},
+		false,
+		map[string][]string{
+			"include": {"æøå.org"},
+			"exclude": {"api.æøå.org"},
+		},
+	},
+	{
+		[]string{"   æøå.org. "},
+		[]string{"   .api.æøå.org    "},
+		[]string{"foo.api.æøå.org", "bar.baz.api.æøå.org."},
+		false,
+		map[string][]string{
+			"include": {"æøå.org"},
+			"exclude": {".api.æøå.org"},
+		},
+	},
+	{
 		[]string{"example.org."},
 		[]string{"api.example.org"},
 		[]string{"dev-api.example.org", "qa-api.example.org"},
@@ -298,6 +319,16 @@ var domainFilterTests = []domainFilterTest{
 		},
 	},
 	{
+		[]string{"sTOnks📈.ORG", "API.xn--StonkS-u354e.ORG"},
+		[]string{"Foo-Bar.stoNks📈.Org"},
+		[]string{"FoOoo.Api.Stonks📈.Org"},
+		true,
+		map[string][]string{
+			"include": {"api.stonks📈.org", "stonks📈.org"},
+			"exclude": {"foo-bar.stonks📈.org"},
+		},
+	},
+	{
 		[]string{"eXaMPle.ORG", "API.example.ORG"},
 		[]string{"api.example.org"},
 		[]string{"foobar.Example.Org"},
@@ -321,7 +352,7 @@ var domainFilterTests = []domainFilterTest{
 
 var regexDomainFilterTests = []regexDomainFilterTest{
 	{
-		regexp.MustCompile("\\.org$"),
+		regexp.MustCompile(`\.org$`),
 		regexp.MustCompile(""),
 		[]string{"foo.org", "bar.org", "foo.bar.org"},
 		true,
@@ -330,7 +361,7 @@ var regexDomainFilterTests = []regexDomainFilterTest{
 		},
 	},
 	{
-		regexp.MustCompile("\\.bar\\.org$"),
+		regexp.MustCompile(`\.bar\.org$`),
 		regexp.MustCompile(""),
 		[]string{"foo.org", "bar.org", "example.com"},
 		false,
@@ -339,7 +370,7 @@ var regexDomainFilterTests = []regexDomainFilterTest{
 		},
 	},
 	{
-		regexp.MustCompile("(?:foo|bar)\\.org$"),
+		regexp.MustCompile(`(?:foo|bar)\.org$`),
 		regexp.MustCompile(""),
 		[]string{"foo.org", "bar.org", "example.foo.org", "example.bar.org", "a.example.foo.org", "a.example.bar.org"},
 		true,
@@ -348,18 +379,37 @@ var regexDomainFilterTests = []regexDomainFilterTest{
 		},
 	},
 	{
-		regexp.MustCompile("(?:foo|bar)\\.org$"),
-		regexp.MustCompile("^example\\.(?:foo|bar)\\.org$"),
-		[]string{"foo.org", "bar.org", "a.example.foo.org", "a.example.bar.org"},
+		regexp.MustCompile("(?:😍|🤩)\\.org$"),
+		regexp.MustCompile(""),
+		[]string{"😍.org", "xn--r28h.org", "🤩.org", "example.😍.org", "example.🤩.org", "a.example.xn--r28h.org", "a.example.🤩.org"},
 		true,
 		map[string]string{
-			"regexInclude": "(?:foo|bar)\\.org$",
-			"regexExclude": "^example\\.(?:foo|bar)\\.org$",
+			"regexInclude": "(?:😍|🤩)\\.org$",
+		},
+	},
+	{
+		regexp.MustCompile("(?:😍|🤩)\\.org$"),
+		regexp.MustCompile("^example\\.(?:😍|🤩)\\.org$"),
+		[]string{"example.😍.org", "example.🤩.org"},
+		false,
+		map[string]string{
+			"regexInclude": "(?:😍|🤩)\\.org$",
+			"regexExclude": "^example\\.(?:😍|🤩)\\.org$",
 		},
 	},
 	{
 		regexp.MustCompile("(?:foo|bar)\\.org$"),
 		regexp.MustCompile("^example\\.(?:foo|bar)\\.org$"),
+		[]string{"foo.org", "bar.org", "a.example.foo.org", "a.example.bar.org"},
+		true,
+		map[string]string{
+			"regexInclude": `(?:foo|bar)\.org$`,
+			"regexExclude": `^example\.(?:foo|bar)\.org$`,
+		},
+	},
+	{
+		regexp.MustCompile(`(?:foo|bar)\.org$`),
+		regexp.MustCompile(`^example\.(?:foo|bar)\.org$`),
 		[]string{"example.foo.org", "example.bar.org"},
 		false,
 		map[string]string{
@@ -368,8 +418,8 @@ var regexDomainFilterTests = []regexDomainFilterTest{
 		},
 	},
 	{
-		regexp.MustCompile("(?:foo|bar)\\.org$"),
-		regexp.MustCompile("^example\\.(?:foo|bar)\\.org$"),
+		regexp.MustCompile(`(?:foo|bar)\.org$`),
+		regexp.MustCompile(`^example\.(?:foo|bar)\.org$`),
 		[]string{"foo.org", "bar.org", "a.example.foo.org", "a.example.bar.org"},
 		true,
 		map[string]string{
@@ -479,8 +529,8 @@ func TestPrepareFiltersStripsWhitespaceAndDotSuffix(t *testing.T) {
 			nil,
 		},
 		{
-			[]string{"  foo   ", "  bar. ", "baz."},
-			[]string{"foo", "bar", "baz"},
+			[]string{"  foo   ", "  bar. ", "baz.", "xn--bar-zna"},
+			[]string{"foo", "bar", "baz", "øbar"},
 		},
 		{
 			[]string{"foo.bar", "  foo.bar.  ", " foo.bar.baz ", " foo.bar.baz.  "},
@@ -495,8 +545,8 @@ func TestPrepareFiltersStripsWhitespaceAndDotSuffix(t *testing.T) {
 
 func TestMatchFilterReturnsProperEmptyVal(t *testing.T) {
 	emptyFilters := []string{}
-	assert.Equal(t, true, matchFilter(emptyFilters, "somedomain.com", true))
-	assert.Equal(t, false, matchFilter(emptyFilters, "somedomain.com", false))
+	assert.True(t, matchFilter(emptyFilters, "somedomain.com", true))
+	assert.False(t, matchFilter(emptyFilters, "somedomain.com", false))
 }
 
 func TestDomainFilterIsConfigured(t *testing.T) {
@@ -651,7 +701,7 @@ func TestDomainFilterDeserializeError(t *testing.T) {
 	}
 }
 
-func assertSerializes[T any](t *testing.T, domainFilter DomainFilter, expectedSerialization map[string]T) {
+func assertSerializes[T any](t *testing.T, domainFilter *DomainFilter, expectedSerialization map[string]T) {
 	serialized, err := json.Marshal(domainFilter)
 	assert.NoError(t, err, "serializing")
 	expected, err := json.Marshal(expectedSerialization)
@@ -659,12 +709,243 @@ func assertSerializes[T any](t *testing.T, domainFilter DomainFilter, expectedSe
 	assert.JSONEq(t, string(expected), string(serialized), "json serialization")
 }
 
-func deserialize[T any](t *testing.T, serialized map[string]T) DomainFilter {
+func deserialize[T any](t *testing.T, serialized map[string]T) *DomainFilter {
 	inJson, err := json.Marshal(serialized)
 	require.NoError(t, err)
 	var deserialized DomainFilter
 	err = json.Unmarshal(inJson, &deserialized)
 	assert.NoError(t, err, "deserializing")
 
-	return deserialized
+	return &deserialized
+}
+
+func TestDomainFilterMatchParent(t *testing.T) {
+	parentMatchTests := []domainFilterTest{
+		{
+			[]string{"a.example.com."},
+			[]string{},
+			[]string{"example.com"},
+			true,
+			map[string][]string{
+				"include": {"a.example.com"},
+			},
+		},
+		{
+			[]string{" a.example.com "},
+			[]string{},
+			[]string{"example.com"},
+			true,
+			map[string][]string{
+				"include": {"a.example.com"},
+			},
+		},
+		{
+			[]string{""},
+			[]string{},
+			[]string{"example.com"},
+			true,
+			map[string][]string{},
+		},
+		{
+			[]string{".a.example.com."},
+			[]string{},
+			[]string{"example.com"},
+			false,
+			map[string][]string{
+				"include": {".a.example.com"},
+			},
+		},
+		{
+			[]string{"a.example.com.", "b.example.com"},
+			[]string{},
+			[]string{"example.com"},
+			true,
+			map[string][]string{
+				"include": {"a.example.com", "b.example.com"},
+			},
+		},
+		{
+			[]string{"a.xn--c1yn36f.æøå.", "b.點看.xn--5cab8c", "c.點看.æøå"},
+			[]string{},
+			[]string{"xn--c1yn36f.xn--5cab8c"},
+			true,
+			map[string][]string{
+				"include": {"a.點看.æøå", "b.點看.æøå", "c.點看.æøå"},
+			},
+		},
+		{
+			[]string{"punycode.xn--c1yn36f.local", "å.點看.local.", "ø.點看.local"},
+			[]string{},
+			[]string{"點看.local"},
+			true,
+			map[string][]string{
+				"include": {"punycode.點看.local", "å.點看.local", "ø.點看.local"},
+			},
+		},
+		{
+			[]string{"a.example.com"},
+			[]string{},
+			[]string{"b.example.com"},
+			false,
+			map[string][]string{
+				"include": {"a.example.com"},
+			},
+		},
+		{
+			[]string{"example.com"},
+			[]string{},
+			[]string{"example.com"},
+			false,
+			map[string][]string{
+				"include": {"example.com"},
+			},
+		},
+		{
+			[]string{"example.com"},
+			[]string{},
+			[]string{"anexample.com"},
+			false,
+			map[string][]string{
+				"include": {"example.com"},
+			},
+		},
+		{
+			[]string{""},
+			[]string{},
+			[]string{""},
+			true,
+			map[string][]string{},
+		},
+	}
+	for i, tt := range parentMatchTests {
+		t.Run(fmt.Sprintf("%d", i), func(t *testing.T) {
+			domainFilter := NewDomainFilterWithExclusions(tt.domainFilter, tt.exclusions)
+
+			assertSerializes(t, domainFilter, tt.expectedSerialization)
+			deserialized := deserialize(t, map[string][]string{
+				"include": tt.domainFilter,
+				"exclude": tt.exclusions,
+			})
+
+			for _, domain := range tt.domains {
+				assert.Equal(t, tt.expected, domainFilter.MatchParent(domain), "%v", domain)
+				assert.Equal(t, tt.expected, domainFilter.MatchParent(domain+"."), "%v", domain+".")
+
+				assert.Equal(t, tt.expected, deserialized.MatchParent(domain), "deserialized %v", domain)
+				assert.Equal(t, tt.expected, deserialized.MatchParent(domain+"."), "deserialized %v", domain+".")
+			}
+		})
+	}
+}
+
+func TestSimpleDomainFilterWithExclusion(t *testing.T) {
+	test := []struct {
+		domainFilter    []string
+		exclusionFilter []string
+		domains         []string
+		want            []string
+	}{
+		{
+			domainFilter:    []string{"ex.com"},
+			exclusionFilter: []string{"subdomain.ex.com"},
+			domains:         []string{"subdomain.ex.com", "ex.com", "subdomain.ex.com.", ".subdomain.ex.com", "one.subdomain.ex.com", "ex.com."},
+			want:            []string{"ex.com", "ex.com."},
+		},
+		{
+			domainFilter:    []string{"ex.com"},
+			exclusionFilter: []string{},
+			domains:         []string{"subdomain.ex.com", "ex.com", "subdomain.ex.com.", ".subdomain.ex.com", "one.subdomain.ex.com", "ex.com."},
+			want:            []string{"subdomain.ex.com", "ex.com", "subdomain.ex.com.", ".subdomain.ex.com", "one.subdomain.ex.com", "ex.com."},
+		},
+		{
+			domainFilter:    []string{"ex.com"},
+			exclusionFilter: []string{"one.subdomain.ex.com"},
+			domains:         []string{"subdomain.ex.com", "ex.com", "subdomain.ex.com.", ".subdomain.ex.com", "one.subdomain.ex.com", "ex.com."},
+			want:            []string{"subdomain.ex.com", "ex.com", "subdomain.ex.com.", ".subdomain.ex.com", "ex.com."},
+		},
+		{
+			domainFilter:    []string{"ex.com"},
+			exclusionFilter: []string{".ex.com"},
+			domains:         []string{"subdomain.ex.com", "ex.com", "subdomain.ex.com.", ".subdomain.ex.com", "one.subdomain.ex.com", "ex.com."},
+			want:            []string{"ex.com", "ex.com."},
+		},
+	}
+
+	for _, tt := range test {
+		t.Run(fmt.Sprintf("include:%s-exclude:%s", strings.Join(tt.domainFilter, "_"), strings.Join(tt.exclusionFilter, "_")), func(t *testing.T) {
+			domainFilter := NewDomainFilterWithExclusions(tt.domainFilter, tt.exclusionFilter)
+			var got []string
+			for _, domain := range tt.domains {
+				if domainFilter.Match(domain) {
+					got = append(got, domain)
+				}
+			}
+			assert.Len(t, tt.want, len(got))
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestDomainFilterNormalizeDomain(t *testing.T) {
+	records := []struct {
+		dnsName string
+		expect  string
+	}{
+		{
+			"3AAAA.FOO.BAR.COM",
+			"3aaaa.foo.bar.com",
+		},
+		{
+			"example.foo.com.",
+			"example.foo.com",
+		},
+		{
+			"example123.foo.com",
+			"example123.foo.com",
+		},
+		{
+			"foo.com.",
+			"foo.com",
+		},
+		{
+			"foo123.COM",
+			"foo123.com",
+		},
+		{
+			"my-exaMple3.FOO.BAR.COM",
+			"my-example3.foo.bar.com",
+		},
+		{
+			"my-example1214.FOO-1235.BAR-foo.COM",
+			"my-example1214.foo-1235.bar-foo.com",
+		},
+		{
+			"my-example-my-example-1214.FOO-1235.BAR-foo.COM",
+			"my-example-my-example-1214.foo-1235.bar-foo.com",
+		},
+		{
+			"xn--c1yn36f.org.",
+			"點看.org",
+		},
+		{
+			"xn--nordic--w1a.xn--xn--kItty-pd34d-hn01b3542b.com",
+			"nordic-ø.xn--kitty-點看pd34d.com",
+		},
+		{
+			"xn--nordic--w1a.xn--kItty-pd34d.com",
+			"nordic-ø.kitty😸.com",
+		},
+		{
+			"nordic-ø.kitty😸.COM",
+			"nordic-ø.kitty😸.com",
+		},
+		{
+			"xn--nordic--w1a.kiTTy😸.com.",
+			"nordic-ø.kitty😸.com",
+		},
+	}
+	for _, r := range records {
+		gotName := normalizeDomain(r.dnsName)
+		assert.Equal(t, r.expect, gotName)
+	}
 }

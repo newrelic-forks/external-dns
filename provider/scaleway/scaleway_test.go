@@ -26,6 +26,7 @@ import (
 	"github.com/scaleway/scaleway-sdk-go/scw"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"sigs.k8s.io/external-dns/endpoint"
 	"sigs.k8s.io/external-dns/plan"
 )
@@ -106,14 +107,31 @@ func (m *mockScalewayDomain) ListDNSZoneRecords(req *domain.ListDNSZoneRecordsRe
 	}, nil
 }
 
-func (m *mockScalewayDomain) UpdateDNSZoneRecords(req *domain.UpdateDNSZoneRecordsRequest, opts ...scw.RequestOption) (*domain.UpdateDNSZoneRecordsResponse, error) {
-	return nil, nil
+func (m *mockScalewayDomain) UpdateDNSZoneRecords(_ *domain.UpdateDNSZoneRecordsRequest, _ ...scw.RequestOption) (*domain.UpdateDNSZoneRecordsResponse, error) {
+	return &domain.UpdateDNSZoneRecordsResponse{}, nil
 }
 
 func TestScalewayProvider_NewScalewayProvider(t *testing.T) {
+	profile := `profiles:
+  foo:
+    access_key: SCWXXXXXXXXXXXXXXXXX
+    secret_key: 11111111-1111-1111-1111-111111111111
+`
+	tmpDir := t.TempDir()
+	err := os.WriteFile(tmpDir+"/config.yaml", []byte(profile), 0600)
+	if err != nil {
+		t.Errorf("failed : %s", err)
+	}
+	_ = os.Setenv(scw.ScwActiveProfileEnv, "foo")
+	_ = os.Setenv(scw.ScwConfigPathEnv, tmpDir+"/config.yaml")
+	_, err = NewScalewayProvider(context.TODO(), endpoint.NewDomainFilter([]string{"example.com"}), true)
+	if err != nil {
+		t.Errorf("failed : %s", err)
+	}
+
 	_ = os.Setenv(scw.ScwAccessKeyEnv, "SCWXXXXXXXXXXXXXXXXX")
 	_ = os.Setenv(scw.ScwSecretKeyEnv, "11111111-1111-1111-1111-111111111111")
-	_, err := NewScalewayProvider(context.TODO(), endpoint.NewDomainFilter([]string{"example.com"}), true)
+	_, err = NewScalewayProvider(context.TODO(), endpoint.NewDomainFilter([]string{"example.com"}), true)
 	if err != nil {
 		t.Errorf("failed : %s", err)
 	}
@@ -142,6 +160,14 @@ func TestScalewayProvider_NewScalewayProvider(t *testing.T) {
 	if err == nil {
 		t.Errorf("expected to fail")
 	}
+}
+
+func TestScalewayProvider_OptionnalConfigFile(t *testing.T) {
+	_ = os.Setenv(scw.ScwAccessKeyEnv, "SCWXXXXXXXXXXXXXXXXX")
+	_ = os.Setenv(scw.ScwSecretKeyEnv, "11111111-1111-1111-1111-111111111111")
+
+	_, err := NewScalewayProvider(context.TODO(), endpoint.NewDomainFilter([]string{"example.com"}), true)
+	assert.NoError(t, err)
 }
 
 func TestScalewayProvider_AdjustEndpoints(t *testing.T) {
@@ -220,7 +246,8 @@ func TestScalewayProvider_AdjustEndpoints(t *testing.T) {
 		},
 	}
 
-	after := provider.AdjustEndpoints(before)
+	after, err := provider.AdjustEndpoints(before)
+	require.NoError(t, err)
 	for i := range after {
 		if !checkRecordEquality(after[i], expected[i]) {
 			t.Errorf("got record %s instead of %s", after[i], expected[i])
@@ -326,7 +353,7 @@ func TestScalewayProvider_Records(t *testing.T) {
 				found = true
 			}
 		}
-		assert.Equal(t, true, found)
+		assert.True(t, found)
 	}
 }
 

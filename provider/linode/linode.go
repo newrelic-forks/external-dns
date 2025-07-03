@@ -31,6 +31,8 @@ import (
 	"sigs.k8s.io/external-dns/endpoint"
 	"sigs.k8s.io/external-dns/plan"
 	"sigs.k8s.io/external-dns/provider"
+
+	"sigs.k8s.io/external-dns/pkg/apis/externaldns"
 )
 
 // LinodeDomainClient interface to ease testing
@@ -46,7 +48,7 @@ type LinodeDomainClient interface {
 type LinodeProvider struct {
 	provider.BaseProvider
 	Client       LinodeDomainClient
-	domainFilter endpoint.DomainFilter
+	domainFilter *endpoint.DomainFilter
 	DryRun       bool
 }
 
@@ -77,7 +79,7 @@ type LinodeChangeDelete struct {
 }
 
 // NewLinodeProvider initializes a new Linode DNS based Provider.
-func NewLinodeProvider(domainFilter endpoint.DomainFilter, dryRun bool, appVersion string) (*LinodeProvider, error) {
+func NewLinodeProvider(domainFilter *endpoint.DomainFilter, dryRun bool) (*LinodeProvider, error) {
 	token, ok := os.LookupEnv("LINODE_TOKEN")
 	if !ok {
 		return nil, fmt.Errorf("no token found")
@@ -92,17 +94,16 @@ func NewLinodeProvider(domainFilter endpoint.DomainFilter, dryRun bool, appVersi
 	}
 
 	linodeClient := linodego.NewClient(oauth2Client)
-	linodeClient.SetUserAgent(fmt.Sprintf("ExternalDNS/%s linodego/%s", appVersion, linodego.Version))
+	linodeClient.SetUserAgent(fmt.Sprintf("%s linodego/%s", externaldns.UserAgent(), linodego.Version))
 
-	provider := &LinodeProvider{
+	return &LinodeProvider{
 		Client:       &linodeClient,
 		domainFilter: domainFilter,
 		DryRun:       dryRun,
-	}
-	return provider, nil
+	}, nil
 }
 
-// Zones returns the list of hosted zones.
+// Zones return the list of hosted zones.
 func (p *LinodeProvider) Zones(ctx context.Context) ([]linodego.Domain, error) {
 	zones, err := p.fetchZones(ctx)
 	if err != nil {
@@ -241,8 +242,13 @@ func (p *LinodeProvider) submitChanges(ctx context.Context, changes LinodeChange
 	return nil
 }
 
-func getWeight() *int {
+func getWeight(recordType linodego.DomainRecordType) *int {
 	weight := 1
+
+	// NS records do not support having weight
+	if recordType == linodego.RecordTypeNS {
+		weight = 0
+	}
 	return &weight
 }
 
@@ -315,7 +321,8 @@ func (p *LinodeProvider) ApplyChanges(ctx context.Context, changes *plan.Changes
 					"zoneName":   zone.Domain,
 					"dnsName":    ep.DNSName,
 					"recordType": ep.RecordType,
-				}).Warn("Records found which should not exist")
+				}).Warn("Records found which should not exist. Not touching it.")
+				continue
 			}
 
 			recordType, err := convertRecordType(ep.RecordType)
@@ -330,7 +337,7 @@ func (p *LinodeProvider) ApplyChanges(ctx context.Context, changes *plan.Changes
 						Target:   target,
 						Name:     getStrippedRecordName(zone, ep),
 						Type:     recordType,
-						Weight:   getWeight(),
+						Weight:   getWeight(recordType),
 						Port:     getPort(),
 						Priority: getPriority(),
 						TTLSec:   int(ep.RecordTTL),
@@ -394,7 +401,7 @@ func (p *LinodeProvider) ApplyChanges(ctx context.Context, changes *plan.Changes
 							Target:   target,
 							Name:     getStrippedRecordName(zone, ep),
 							Type:     recordType,
-							Weight:   getWeight(),
+							Weight:   getWeight(recordType),
 							Port:     getPort(),
 							Priority: getPriority(),
 							TTLSec:   int(ep.RecordTTL),
@@ -418,7 +425,7 @@ func (p *LinodeProvider) ApplyChanges(ctx context.Context, changes *plan.Changes
 							Target:   target,
 							Name:     getStrippedRecordName(zone, ep),
 							Type:     recordType,
-							Weight:   getWeight(),
+							Weight:   getWeight(recordType),
 							Port:     getPort(),
 							Priority: getPriority(),
 							TTLSec:   int(ep.RecordTTL),
@@ -514,6 +521,8 @@ func convertRecordType(recordType string) (linodego.DomainRecordType, error) {
 		return linodego.RecordTypeTXT, nil
 	case "SRV":
 		return linodego.RecordTypeSRV, nil
+	case "NS":
+		return linodego.RecordTypeNS, nil
 	default:
 		return "", fmt.Errorf("invalid Record Type: %s", recordType)
 	}

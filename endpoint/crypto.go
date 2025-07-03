@@ -29,6 +29,17 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+const standardGcmNonceSize = 12
+
+// GenerateNonce creates a random nonce of a fixed size
+func GenerateNonce() ([]byte, error) {
+	nonce := make([]byte, standardGcmNonceSize)
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, err
+	}
+	return []byte(base64.StdEncoding.EncodeToString(nonce)), nil
+}
+
 // EncryptText gzip input data and encrypts it using the supplied AES key
 func EncryptText(text string, aesKey []byte, nonceEncoded []byte) (string, error) {
 	block, err := aes.NewCipher(aesKey)
@@ -36,20 +47,14 @@ func EncryptText(text string, aesKey []byte, nonceEncoded []byte) (string, error
 		return "", err
 	}
 
-	gcm, err := cipher.NewGCM(block)
+	gcm, err := cipher.NewGCMWithNonceSize(block, standardGcmNonceSize)
 	if err != nil {
 		return "", err
 	}
 
-	nonce := make([]byte, gcm.NonceSize())
-	if nonceEncoded == nil {
-		if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
-			return "", err
-		}
-	} else {
-		if _, err = base64.StdEncoding.Decode(nonce, nonceEncoded); err != nil {
-			return "", err
-		}
+	nonce := make([]byte, standardGcmNonceSize)
+	if _, err = base64.StdEncoding.Decode(nonce, nonceEncoded); err != nil {
+		return "", err
 	}
 
 	data, err := compressData([]byte(text))
@@ -63,7 +68,7 @@ func EncryptText(text string, aesKey []byte, nonceEncoded []byte) (string, error
 
 // DecryptText decrypt gziped data using a supplied AES encryption key ang ungzip it
 // in case of decryption failed, will return original input and decryption error
-func DecryptText(text string, aesKey []byte) (decryptResult string, encryptNonce string, err error) {
+func DecryptText(text string, aesKey []byte) (string, string, error) {
 	block, err := aes.NewCipher(aesKey)
 	if err != nil {
 		return "", "", err
@@ -95,7 +100,7 @@ func DecryptText(text string, aesKey []byte) (decryptResult string, encryptNonce
 }
 
 // decompressData gzip compressed data
-func decompressData(data []byte) (resData []byte, err error) {
+func decompressData(data []byte) ([]byte, error) {
 	gz, err := gzip.NewReader(bytes.NewBuffer(data))
 	if err != nil {
 		return nil, err
@@ -110,7 +115,7 @@ func decompressData(data []byte) (resData []byte, err error) {
 }
 
 // compressData by gzip, for minify data stored in registry
-func compressData(data []byte) (compressedData []byte, err error) {
+func compressData(data []byte) ([]byte, error) {
 	var b bytes.Buffer
 	gz, err := gzip.NewWriterLevel(&b, gzip.BestCompression)
 	if err != nil {

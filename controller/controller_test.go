@@ -19,13 +19,11 @@ package controller
 import (
 	"context"
 	"errors"
-	"math"
 	"reflect"
 	"sort"
+	"sync"
 	"testing"
 	"time"
-
-	"github.com/prometheus/client_golang/prometheus"
 
 	"sigs.k8s.io/external-dns/endpoint"
 	"sigs.k8s.io/external-dns/internal/testutils"
@@ -47,7 +45,7 @@ type mockProvider struct {
 
 type filteredMockProvider struct {
 	provider.BaseProvider
-	domainFilter      endpoint.DomainFilter
+	domainFilter      *endpoint.DomainFilter
 	RecordsStore      []*endpoint.Endpoint
 	RecordsCallCount  int
 	ApplyChangesCalls []*plan.Changes
@@ -57,7 +55,7 @@ type errorMockProvider struct {
 	mockProvider
 }
 
-func (p *filteredMockProvider) GetDomainFilter() endpoint.DomainFilter {
+func (p *filteredMockProvider) GetDomainFilter() endpoint.DomainFilterInterface {
 	return p.domainFilter
 }
 
@@ -131,12 +129,9 @@ func newMockProvider(endpoints []*endpoint.Endpoint, changes *plan.Changes) prov
 	return dnsProvider
 }
 
-// TestRunOnce tests that RunOnce correctly orchestrates the different components.
-func TestRunOnce(t *testing.T) {
+func getTestSource() *testutils.MockSource {
 	// Fake some desired endpoints coming from our source.
 	source := new(testutils.MockSource)
-	cfg := externaldns.NewConfig()
-	cfg.ManagedDNSRecordTypes = []string{endpoint.RecordTypeA, endpoint.RecordTypeAAAA, endpoint.RecordTypeCNAME}
 	source.On("Endpoints").Return([]*endpoint.Endpoint{
 		{
 			DNSName:    "create-record",
@@ -160,8 +155,18 @@ func TestRunOnce(t *testing.T) {
 		},
 	}, nil)
 
+	return source
+}
+
+func getTestConfig() *externaldns.Config {
+	cfg := externaldns.NewConfig()
+	cfg.ManagedDNSRecordTypes = []string{endpoint.RecordTypeA, endpoint.RecordTypeAAAA, endpoint.RecordTypeCNAME}
+	return cfg
+}
+
+func getTestProvider() provider.Provider {
 	// Fake some existing records in our DNS provider and validate some desired changes.
-	provider := newMockProvider(
+	return newMockProvider(
 		[]*endpoint.Endpoint{
 			{
 				DNSName:    "update-record",
@@ -203,6 +208,13 @@ func TestRunOnce(t *testing.T) {
 			},
 		},
 	)
+}
+
+// TestRunOnce tests that RunOnce correctly orchestrates the different components.
+func TestRunOnce(t *testing.T) {
+	source := getTestSource()
+	cfg := getTestConfig()
+	provider := getTestProvider()
 
 	r, err := registry.NewNoopRegistry(provider)
 	require.NoError(t, err)
@@ -220,25 +232,57 @@ func TestRunOnce(t *testing.T) {
 	// Validate that the mock source was called.
 	source.AssertExpectations(t)
 	// check the verified records
-	assert.Equal(t, math.Float64bits(1), valueFromMetric(verifiedARecords))
-	assert.Equal(t, math.Float64bits(1), valueFromMetric(verifiedAAAARecords))
+
+	testutils.TestHelperVerifyMetricsGaugeVectorWithLabels(t, 1, verifiedRecords.Gauge, map[string]string{"record_type": "a"})
+	testutils.TestHelperVerifyMetricsGaugeVectorWithLabels(t, 1, verifiedRecords.Gauge, map[string]string{"record_type": "aaaa"})
 }
 
-func valueFromMetric(metric prometheus.Gauge) uint64 {
-	ref := reflect.ValueOf(metric)
-	return reflect.Indirect(ref).FieldByName("valBits").Uint()
+// TestRun tests that Run correctly starts and stops
+func TestRun(t *testing.T) {
+	source := getTestSource()
+	cfg := getTestConfig()
+	provider := getTestProvider()
+
+	r, err := registry.NewNoopRegistry(provider)
+	require.NoError(t, err)
+
+	// Run our controller once to trigger the validation.
+	ctrl := &Controller{
+		Source:             source,
+		Registry:           r,
+		Policy:             &plan.SyncPolicy{},
+		ManagedRecordTypes: cfg.ManagedDNSRecordTypes,
+	}
+	ctrl.nextRunAt = time.Now().Add(-time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	go func() {
+		ctrl.Run(ctx)
+		close(stopped)
+	}()
+	time.Sleep(1500 * time.Millisecond)
+	cancel() // start shutdown
+	<-stopped
+
+	// Validate that the mock source was called.
+	source.AssertExpectations(t)
+
+	testutils.TestHelperVerifyMetricsGaugeVectorWithLabels(t, 1, verifiedRecords.Gauge, map[string]string{"record_type": "a"})
+	testutils.TestHelperVerifyMetricsGaugeVectorWithLabels(t, 1, verifiedRecords.Gauge, map[string]string{"record_type": "aaaa"})
 }
 
 func TestShouldRunOnce(t *testing.T) {
-	ctrl := &Controller{Interval: 10 * time.Minute, MinEventSyncInterval: 5 * time.Second}
+	ctrl := &Controller{Interval: 10 * time.Minute, MinEventSyncInterval: 15 * time.Second}
 
 	now := time.Now()
 
 	// First run of Run loop should execute RunOnce
 	assert.True(t, ctrl.ShouldRunOnce(now))
+	assert.Equal(t, now.Add(10*time.Minute), ctrl.nextRunAt)
 
 	// Second run should not
 	assert.False(t, ctrl.ShouldRunOnce(now))
+	ctrl.lastRunAt = now
 
 	now = now.Add(10 * time.Second)
 	// Changes happen in ingresses or services
@@ -268,18 +312,23 @@ func TestShouldRunOnce(t *testing.T) {
 	assert.False(t, ctrl.ShouldRunOnce(now))
 
 	// Multiple ingresses or services changes, closer than MinInterval from each other
+	ctrl.lastRunAt = now
 	firstChangeTime := now
 	secondChangeTime := firstChangeTime.Add(time.Second)
 	// First change
 	ctrl.ScheduleRunOnce(firstChangeTime)
 	// Second change
 	ctrl.ScheduleRunOnce(secondChangeTime)
+
+	// Executions should be spaced by at least MinEventSyncInterval
+	assert.False(t, ctrl.ShouldRunOnce(now.Add(5*time.Second)))
+
 	// Should not postpone the reconciliation further than firstChangeTime + MinInterval
 	now = now.Add(ctrl.MinEventSyncInterval)
 	assert.True(t, ctrl.ShouldRunOnce(now))
 }
 
-func testControllerFiltersDomains(t *testing.T, configuredEndpoints []*endpoint.Endpoint, domainFilter endpoint.DomainFilter, providerEndpoints []*endpoint.Endpoint, expectedChanges []*plan.Changes) {
+func testControllerFiltersDomains(t *testing.T, configuredEndpoints []*endpoint.Endpoint, domainFilter *endpoint.DomainFilter, providerEndpoints []*endpoint.Endpoint, expectedChanges []*plan.Changes) {
 	t.Helper()
 	cfg := externaldns.NewConfig()
 	cfg.ManagedDNSRecordTypes = []string{endpoint.RecordTypeA, endpoint.RecordTypeAAAA, endpoint.RecordTypeCNAME}
@@ -353,7 +402,7 @@ func TestWhenNoFilterControllerConsidersAllComain(t *testing.T) {
 				Targets:    endpoint.Targets{"8.8.8.8"},
 			},
 		},
-		endpoint.DomainFilter{},
+		&endpoint.DomainFilter{},
 		[]*endpoint.Endpoint{
 			{
 				DNSName:    "some-record.used.tld",
@@ -435,252 +484,72 @@ func TestWhenMultipleControllerConsidersAllFilteredComain(t *testing.T) {
 	)
 }
 
-func TestVerifyARecords(t *testing.T) {
-	testControllerFiltersDomains(
-		t,
-		[]*endpoint.Endpoint{
-			{
-				DNSName:    "create-record.used.tld",
-				RecordType: endpoint.RecordTypeA,
-				Targets:    endpoint.Targets{"1.2.3.4"},
-			},
-			{
-				DNSName:    "some-record.used.tld",
-				RecordType: endpoint.RecordTypeA,
-				Targets:    endpoint.Targets{"8.8.8.8"},
-			},
-		},
-		endpoint.NewDomainFilter([]string{"used.tld"}),
-		[]*endpoint.Endpoint{
-			{
-				DNSName:    "some-record.used.tld",
-				RecordType: endpoint.RecordTypeA,
-				Targets:    endpoint.Targets{"8.8.8.8"},
-			},
-			{
-				DNSName:    "create-record.used.tld",
-				RecordType: endpoint.RecordTypeA,
-				Targets:    endpoint.Targets{"1.2.3.4"},
-			},
-		},
-		[]*plan.Changes{},
-	)
-	assert.Equal(t, math.Float64bits(2), valueFromMetric(verifiedARecords))
-
-	testControllerFiltersDomains(
-		t,
-		[]*endpoint.Endpoint{
-			{
-				DNSName:    "some-record.1.used.tld",
-				RecordType: endpoint.RecordTypeA,
-				Targets:    endpoint.Targets{"1.2.3.4"},
-			},
-			{
-				DNSName:    "some-record.2.used.tld",
-				RecordType: endpoint.RecordTypeA,
-				Targets:    endpoint.Targets{"8.8.8.8"},
-			},
-			{
-				DNSName:    "some-record.3.used.tld",
-				RecordType: endpoint.RecordTypeA,
-				Targets:    endpoint.Targets{"24.24.24.24"},
-			},
-		},
-		endpoint.NewDomainFilter([]string{"used.tld"}),
-		[]*endpoint.Endpoint{
-			{
-				DNSName:    "some-record.1.used.tld",
-				RecordType: endpoint.RecordTypeA,
-				Targets:    endpoint.Targets{"1.2.3.4"},
-			},
-			{
-				DNSName:    "some-record.2.used.tld",
-				RecordType: endpoint.RecordTypeA,
-				Targets:    endpoint.Targets{"8.8.8.8"},
-			},
-		},
-		[]*plan.Changes{{
-			Create: []*endpoint.Endpoint{
-				{
-					DNSName:    "some-record.3.used.tld",
-					RecordType: endpoint.RecordTypeA,
-					Targets:    endpoint.Targets{"24.24.24.24"},
-				},
-			},
-		}},
-	)
-	assert.Equal(t, math.Float64bits(2), valueFromMetric(verifiedARecords))
-	assert.Equal(t, math.Float64bits(0), valueFromMetric(verifiedAAAARecords))
+type toggleRegistry struct {
+	registry.NoopRegistry
+	failCount   int
+	failCountMu sync.Mutex // protects failCount
 }
 
-func TestVerifyAAAARecords(t *testing.T) {
-	testControllerFiltersDomains(
-		t,
-		[]*endpoint.Endpoint{
-			{
-				DNSName:    "create-record.used.tld",
-				RecordType: endpoint.RecordTypeAAAA,
-				Targets:    endpoint.Targets{"2001:DB8::1"},
-			},
-			{
-				DNSName:    "some-record.used.tld",
-				RecordType: endpoint.RecordTypeAAAA,
-				Targets:    endpoint.Targets{"2001:DB8::2"},
-			},
-		},
-		endpoint.NewDomainFilter([]string{"used.tld"}),
-		[]*endpoint.Endpoint{
-			{
-				DNSName:    "some-record.used.tld",
-				RecordType: endpoint.RecordTypeAAAA,
-				Targets:    endpoint.Targets{"2001:DB8::2"},
-			},
-			{
-				DNSName:    "create-record.used.tld",
-				RecordType: endpoint.RecordTypeAAAA,
-				Targets:    endpoint.Targets{"2001:DB8::1"},
-			},
-		},
-		[]*plan.Changes{},
-	)
-	assert.Equal(t, math.Float64bits(2), valueFromMetric(verifiedAAAARecords))
+const toggleRegistryFailureCount = 3
 
-	testControllerFiltersDomains(
-		t,
-		[]*endpoint.Endpoint{
-			{
-				DNSName:    "some-record.1.used.tld",
-				RecordType: endpoint.RecordTypeAAAA,
-				Targets:    endpoint.Targets{"2001:DB8::1"},
-			},
-			{
-				DNSName:    "some-record.2.used.tld",
-				RecordType: endpoint.RecordTypeAAAA,
-				Targets:    endpoint.Targets{"2001:DB8::2"},
-			},
-			{
-				DNSName:    "some-record.3.used.tld",
-				RecordType: endpoint.RecordTypeAAAA,
-				Targets:    endpoint.Targets{"2001:DB8::3"},
-			},
-		},
-		endpoint.NewDomainFilter([]string{"used.tld"}),
-		[]*endpoint.Endpoint{
-			{
-				DNSName:    "some-record.1.used.tld",
-				RecordType: endpoint.RecordTypeAAAA,
-				Targets:    endpoint.Targets{"2001:DB8::1"},
-			},
-			{
-				DNSName:    "some-record.2.used.tld",
-				RecordType: endpoint.RecordTypeAAAA,
-				Targets:    endpoint.Targets{"2001:DB8::2"},
-			},
-		},
-		[]*plan.Changes{{
-			Create: []*endpoint.Endpoint{
-				{
-					DNSName:    "some-record.3.used.tld",
-					RecordType: endpoint.RecordTypeAAAA,
-					Targets:    endpoint.Targets{"2001:DB8::3"},
-				},
-			},
-		}},
-	)
-	assert.Equal(t, math.Float64bits(0), valueFromMetric(verifiedARecords))
-	assert.Equal(t, math.Float64bits(2), valueFromMetric(verifiedAAAARecords))
+func (r *toggleRegistry) Records(_ context.Context) ([]*endpoint.Endpoint, error) {
+	r.failCountMu.Lock()
+	defer r.failCountMu.Unlock()
+	if r.failCount < toggleRegistryFailureCount {
+		r.failCount++
+		return nil, provider.SoftError
+	}
+	return []*endpoint.Endpoint{}, nil
 }
 
-func TestARecords(t *testing.T) {
-	testControllerFiltersDomains(
-		t,
-		[]*endpoint.Endpoint{
-			{
-				DNSName:    "record1.used.tld",
-				RecordType: endpoint.RecordTypeA,
-				Targets:    endpoint.Targets{"1.2.3.4"},
-			},
-			{
-				DNSName:    "record2.used.tld",
-				RecordType: endpoint.RecordTypeA,
-				Targets:    endpoint.Targets{"8.8.8.8"},
-			},
-			{
-				DNSName:    "_mysql-svc._tcp.mysql.used.tld",
-				RecordType: endpoint.RecordTypeSRV,
-				Targets:    endpoint.Targets{"0 50 30007 mysql.used.tld"},
-			},
-		},
-		endpoint.NewDomainFilter([]string{"used.tld"}),
-		[]*endpoint.Endpoint{
-			{
-				DNSName:    "record1.used.tld",
-				RecordType: endpoint.RecordTypeA,
-				Targets:    endpoint.Targets{"1.2.3.4"},
-			},
-			{
-				DNSName:    "_mysql-svc._tcp.mysql.used.tld",
-				RecordType: endpoint.RecordTypeSRV,
-				Targets:    endpoint.Targets{"0 50 30007 mysql.used.tld"},
-			},
-		},
-		[]*plan.Changes{{
-			Create: []*endpoint.Endpoint{
-				{
-					DNSName:    "record2.used.tld",
-					RecordType: endpoint.RecordTypeA,
-					Targets:    endpoint.Targets{"8.8.8.8"},
-				},
-			},
-		}},
-	)
-	assert.Equal(t, math.Float64bits(2), valueFromMetric(sourceARecords))
-	assert.Equal(t, math.Float64bits(1), valueFromMetric(registryARecords))
+func (r *toggleRegistry) ApplyChanges(_ context.Context, changes *plan.Changes) error {
+	return nil
 }
 
-func TestAAAARecords(t *testing.T) {
-	testControllerFiltersDomains(
-		t,
-		[]*endpoint.Endpoint{
-			{
-				DNSName:    "record1.used.tld",
-				RecordType: endpoint.RecordTypeAAAA,
-				Targets:    endpoint.Targets{"2001:DB8::1"},
-			},
-			{
-				DNSName:    "record2.used.tld",
-				RecordType: endpoint.RecordTypeAAAA,
-				Targets:    endpoint.Targets{"2001:DB8::2"},
-			},
-			{
-				DNSName:    "_mysql-svc._tcp.mysql.used.tld",
-				RecordType: endpoint.RecordTypeSRV,
-				Targets:    endpoint.Targets{"0 50 30007 mysql.used.tld"},
-			},
-		},
-		endpoint.NewDomainFilter([]string{"used.tld"}),
-		[]*endpoint.Endpoint{
-			{
-				DNSName:    "record1.used.tld",
-				RecordType: endpoint.RecordTypeAAAA,
-				Targets:    endpoint.Targets{"2001:DB8::1"},
-			},
-			{
-				DNSName:    "_mysql-svc._tcp.mysql.used.tld",
-				RecordType: endpoint.RecordTypeSRV,
-				Targets:    endpoint.Targets{"0 50 30007 mysql.used.tld"},
-			},
-		},
-		[]*plan.Changes{{
-			Create: []*endpoint.Endpoint{
-				{
-					DNSName:    "record2.used.tld",
-					RecordType: endpoint.RecordTypeAAAA,
-					Targets:    endpoint.Targets{"2001:DB8::2"},
-				},
-			},
-		}},
-	)
-	assert.Equal(t, math.Float64bits(2), valueFromMetric(sourceAAAARecords))
-	assert.Equal(t, math.Float64bits(1), valueFromMetric(registryAAAARecords))
+func TestToggleRegistry(t *testing.T) {
+	source := getTestSource()
+	cfg := getTestConfig()
+	r := &toggleRegistry{}
+
+	interval := 10 * time.Millisecond
+	ctrl := &Controller{
+		Source:             source,
+		Registry:           r,
+		Policy:             &plan.SyncPolicy{},
+		ManagedRecordTypes: cfg.ManagedDNSRecordTypes,
+		Interval:           interval,
+	}
+	ctrl.nextRunAt = time.Now().Add(-time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	go func() {
+		ctrl.Run(ctx)
+		close(stopped)
+	}()
+
+	// Wait up to 1 minute for failCount to reach at least 3
+	// The timeout serves as a safety net against infinite loops while being
+	// sufficiently large to accommodate slow CI environments
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		r.failCountMu.Lock()
+		count := r.failCount
+		r.failCountMu.Unlock()
+		if count >= toggleRegistryFailureCount {
+			break
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		// Sleep for the controller interval to avoid busy waiting
+		// since the controller won't run again until the interval passes
+		time.Sleep(interval)
+	}
+	cancel()
+	<-stopped
+
+	r.failCountMu.Lock()
+	finalCount := r.failCount
+	r.failCountMu.Unlock()
+	assert.Equal(t, toggleRegistryFailureCount, finalCount, "failCount should be at least %d", toggleRegistryFailureCount)
 }
