@@ -1,1 +1,39 @@
-[{"version": "v0.13.6-nr4", "title": "v0.13.6-nr4", "aliases": ["latest"]}, {"version": "v0.13.6-nr3", "title": "v0.13.6-nr3", "aliases": []}, {"version": "v0.13.6-nr2", "title": "v0.13.6-nr2", "aliases": []}, {"version": "v0.13.6-nr1", "title": "v0.13.6-nr1", "aliases": []}, {"version": "v0.13.5-nr1", "title": "v0.13.5-nr1", "aliases": []}, {"version": "v0.13.4-nr1", "title": "v0.13.4-nr1", "aliases": []}]
+[
+  {
+    "version": "v0.18.0-nr1",
+    "title": "v0.18.0-nr1",
+    "aliases": []
+  },
+  {
+    "version": "v0.13.6-nr4",
+    "title": "v0.13.6-nr4",
+    "aliases": [
+      "latest"
+    ]
+  },
+  {
+    "version": "v0.13.6-nr3",
+    "title": "v0.13.6-nr3",
+    "aliases": []
+  },
+  {
+    "version": "v0.13.6-nr2",
+    "title": "v0.13.6-nr2",
+    "aliases": []
+  },
+  {
+    "version": "v0.13.6-nr1",
+    "title": "v0.13.6-nr1",
+    "aliases": []
+  },
+  {
+    "version": "v0.13.5-nr1",
+    "title": "v0.13.5-nr1",
+    "aliases": []
+  },
+  {
+    "version": "v0.13.4-nr1",
+    "title": "v0.13.4-nr1",
+    "aliases": []
+  }
+]
