@@ -1,4 +1,4 @@
-# kOps dns-controller compatibility mode
+# kOps dns-controller
 
 kOps includes a dns-controller that is primarily used to bootstrap the cluster, but can also be used for provisioning DNS entries for Services and Ingress.
 
@@ -21,11 +21,9 @@ The DNS record mappings try to "do the right thing", but what this means is diff
 
 ### Pods
 
-For the external annotation, ExternalDNS will map a HostNetwork=true Pod to the external IPs of the Node.
+For the external annotation, ExternalDNS will map a Pod to the external IPs of the Node.
 
-For the internal annotation, ExternalDNS will map a HostNetwork=true Pod to the internal IPs of the Node.
-
-ExternalDNS ignore Pods that are not HostNetwork=true
+For the internal annotation, ExternalDNS will map a Pod to the internal IPs of the Node.
 
 Annotations added to Pods will always result in an A record being created.
 

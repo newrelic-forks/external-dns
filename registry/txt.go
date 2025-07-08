@@ -22,6 +22,8 @@ import (
 	"strings"
 	"time"
 
+	b64 "encoding/base64"
+
 	log "github.com/sirupsen/logrus"
 
 	"sigs.k8s.io/external-dns/endpoint"
@@ -58,16 +60,26 @@ type TXTRegistry struct {
 	txtEncryptAESKey  []byte
 }
 
-// NewTXTRegistry returns new TXTRegistry object
-func NewTXTRegistry(provider provider.Provider, txtPrefix, txtSuffix, ownerID string, cacheInterval time.Duration, txtWildcardReplacement string, managedRecordTypes, excludeRecordTypes []string, txtEncryptEnabled bool, txtEncryptAESKey []byte) (*TXTRegistry, error) {
+// NewTXTRegistry returns a new TXTRegistry object. When newFormatOnly is true, it will only
+// generate new format TXT records, otherwise it generates both old and new formats for
+// backwards compatibility.
+func NewTXTRegistry(provider provider.Provider, txtPrefix, txtSuffix, ownerID string,
+	cacheInterval time.Duration, txtWildcardReplacement string,
+	managedRecordTypes, excludeRecordTypes []string,
+	txtEncryptEnabled bool, txtEncryptAESKey []byte) (*TXTRegistry, error) {
 	if ownerID == "" {
 		return nil, errors.New("owner id cannot be empty")
 	}
+
 	if len(txtEncryptAESKey) == 0 {
 		txtEncryptAESKey = nil
 	} else if len(txtEncryptAESKey) != 32 {
-		return nil, errors.New("the AES Encryption key must have a length of 32 bytes")
+		var err error
+		if txtEncryptAESKey, err = b64.StdEncoding.DecodeString(string(txtEncryptAESKey)); err != nil || len(txtEncryptAESKey) != 32 {
+			return nil, errors.New("the AES Encryption key must be 32 bytes long, in either plain text or base64-encoded format")
+		}
 	}
+
 	if txtEncryptEnabled && txtEncryptAESKey == nil {
 		return nil, errors.New("the AES Encryption key must be set when TXT record encryption is enabled")
 	}
@@ -92,10 +104,10 @@ func NewTXTRegistry(provider provider.Provider, txtPrefix, txtSuffix, ownerID st
 }
 
 func getSupportedTypes() []string {
-	return []string{endpoint.RecordTypeA, endpoint.RecordTypeAAAA, endpoint.RecordTypeCNAME, endpoint.RecordTypeNS}
+	return []string{endpoint.RecordTypeA, endpoint.RecordTypeAAAA, endpoint.RecordTypeCNAME, endpoint.RecordTypeNS, endpoint.RecordTypeMX}
 }
 
-func (im *TXTRegistry) GetDomainFilter() endpoint.DomainFilter {
+func (im *TXTRegistry) GetDomainFilter() endpoint.DomainFilterInterface {
 	return im.provider.GetDomainFilter()
 }
 
@@ -130,8 +142,13 @@ func (im *TXTRegistry) Records(ctx context.Context) ([]*endpoint.Endpoint, error
 			continue
 		}
 		// We simply assume that TXT records for the registry will always have only one target.
+		// If there are no targets (e.g for routing policy based records in google), direct targets will be empty
+		if len(record.Targets) == 0 {
+			log.Errorf("TXT record has no targets %s", record.DNSName)
+			continue
+		}
 		labels, err := endpoint.NewLabelsFromString(record.Targets[0], im.txtEncryptAESKey)
-		if err == endpoint.ErrInvalidHeritage {
+		if errors.Is(err, endpoint.ErrInvalidHeritage) {
 			// if no heritage is found or it is invalid
 			// case when value of txt record cannot be identified
 			// record will not be removed as it will have empty owner
@@ -209,41 +226,25 @@ func (im *TXTRegistry) Records(ctx context.Context) ([]*endpoint.Endpoint, error
 	return endpoints, nil
 }
 
-// generateTXTRecord generates both "old" and "new" TXT records.
-// Once we decide to drop old format we need to drop toTXTName() and rename toNewTXTName
+// generateTXTRecord generates TXT records in either both formats (old and new) or new format only,
+// depending on the newFormatOnly configuration. The old format is maintained for backwards
+// compatibility but can be disabled to reduce the number of DNS records.
 func (im *TXTRegistry) generateTXTRecord(r *endpoint.Endpoint) []*endpoint.Endpoint {
-	// Missing TXT records are added to the set of changes.
-	// Obviously, we don't need any other TXT record for them.
-	if r.RecordType == endpoint.RecordTypeTXT {
-		return nil
-	}
-
 	endpoints := make([]*endpoint.Endpoint, 0)
 
-	if !im.txtEncryptEnabled && !im.mapper.recordTypeInAffix() && r.RecordType != endpoint.RecordTypeAAAA {
-		// old TXT record format
-		txt := endpoint.NewEndpoint(im.mapper.toTXTName(r.DNSName), endpoint.RecordTypeTXT, r.Labels.Serialize(true, im.txtEncryptEnabled, im.txtEncryptAESKey))
-		if txt != nil {
-			txt.WithSetIdentifier(r.SetIdentifier)
-			txt.Labels[endpoint.OwnedRecordLabelKey] = r.DNSName
-			txt.ProviderSpecific = r.ProviderSpecific
-			endpoints = append(endpoints, txt)
-		}
-	}
-	// new TXT record format (containing record type)
+	// Always create new format record
 	recordType := r.RecordType
 	// AWS Alias records are encoded as type "cname"
 	if isAlias, found := r.GetProviderSpecificProperty("alias"); found && isAlias == "true" && recordType == endpoint.RecordTypeA {
 		recordType = endpoint.RecordTypeCNAME
 	}
-	txtNew := endpoint.NewEndpoint(im.mapper.toNewTXTName(r.DNSName, recordType), endpoint.RecordTypeTXT, r.Labels.Serialize(true, im.txtEncryptEnabled, im.txtEncryptAESKey))
+	txtNew := endpoint.NewEndpoint(im.mapper.toTXTName(r.DNSName, recordType), endpoint.RecordTypeTXT, r.Labels.Serialize(true, im.txtEncryptEnabled, im.txtEncryptAESKey))
 	if txtNew != nil {
 		txtNew.WithSetIdentifier(r.SetIdentifier)
 		txtNew.Labels[endpoint.OwnedRecordLabelKey] = r.DNSName
 		txtNew.ProviderSpecific = r.ProviderSpecific
 		endpoints = append(endpoints, txtNew)
 	}
-
 	return endpoints
 }
 
@@ -319,8 +320,7 @@ func (im *TXTRegistry) AdjustEndpoints(endpoints []*endpoint.Endpoint) ([]*endpo
 
 type nameMapper interface {
 	toEndpointName(string) (endpointName string, recordType string)
-	toTXTName(string) string
-	toNewTXTName(string, string) string
+	toTXTName(string, string) string
 	recordTypeInAffix() bool
 }
 
@@ -412,25 +412,12 @@ func (pr affixNameMapper) toEndpointName(txtDNSName string) (endpointName string
 		domainWithSuffix := strings.Join(DNSName[:1+dc], ".")
 
 		r, rType := pr.dropAffixExtractType(domainWithSuffix)
+		if !strings.Contains(lowerDNSName, ".") {
+			return r, rType
+		}
 		return r + "." + DNSName[1+dc], rType
 	}
 	return "", ""
-}
-
-func (pr affixNameMapper) toTXTName(endpointDNSName string) string {
-	DNSName := strings.SplitN(endpointDNSName, ".", 2)
-
-	prefix := pr.dropAffixTemplate(pr.prefix)
-	suffix := pr.dropAffixTemplate(pr.suffix)
-	// If specified, replace a leading asterisk in the generated txt record name with some other string
-	if pr.wildcardReplacement != "" && DNSName[0] == "*" {
-		DNSName[0] = pr.wildcardReplacement
-	}
-
-	if len(DNSName) < 2 {
-		return prefix + DNSName[0] + suffix
-	}
-	return prefix + DNSName[0] + suffix + "." + DNSName[1]
 }
 
 func (pr affixNameMapper) recordTypeInAffix() bool {
@@ -450,7 +437,7 @@ func (pr affixNameMapper) normalizeAffixTemplate(afix, recordType string) string
 	return afix
 }
 
-func (pr affixNameMapper) toNewTXTName(endpointDNSName, recordType string) string {
+func (pr affixNameMapper) toTXTName(endpointDNSName, recordType string) string {
 	DNSName := strings.SplitN(endpointDNSName, ".", 2)
 	recordType = strings.ToLower(recordType)
 	recordT := recordType + "-"

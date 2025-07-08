@@ -18,12 +18,12 @@ package source
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 
 	ambassador "github.com/datawire/ambassador/pkg/api/getambassador.io/v2"
-	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -32,19 +32,22 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
-	"k8s.io/client-go/informers"
+	kubeinformers "k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/cache"
 
 	"sigs.k8s.io/external-dns/endpoint"
+	"sigs.k8s.io/external-dns/source/annotations"
+	"sigs.k8s.io/external-dns/source/informers"
 )
 
-// ambHostAnnotation is the annotation in the Host that maps to a Service
-const ambHostAnnotation = "external-dns.ambassador-service"
-
-// groupName is the group name for the Ambassador API
-const groupName = "getambassador.io"
+const (
+	// ambHostAnnotation is the annotation in the Host that maps to a Service
+	ambHostAnnotation = "external-dns.ambassador-service"
+	// groupName is the group name for the Ambassador API
+	groupName = "getambassador.io"
+)
 
 var schemeGroupVersion = schema.GroupVersion{Group: groupName, Version: "v2"}
 
@@ -57,8 +60,10 @@ type ambassadorHostSource struct {
 	dynamicKubeClient      dynamic.Interface
 	kubeClient             kubernetes.Interface
 	namespace              string
-	ambassadorHostInformer informers.GenericInformer
+	annotationFilter       string
+	ambassadorHostInformer kubeinformers.GenericInformer
 	unstructuredConverter  *unstructuredConverter
+	labelSelector          labels.Selector
 }
 
 // NewAmbassadorHostSource creates a new ambassadorHostSource with the given config.
@@ -67,6 +72,8 @@ func NewAmbassadorHostSource(
 	dynamicKubeClient dynamic.Interface,
 	kubeClient kubernetes.Interface,
 	namespace string,
+	annotationFilter string,
+	labelSelector labels.Selector,
 ) (Source, error) {
 	var err error
 
@@ -85,33 +92,37 @@ func NewAmbassadorHostSource(
 
 	informerFactory.Start(ctx.Done())
 
-	if err := waitForDynamicCacheSync(context.Background(), informerFactory); err != nil {
+	// wait for the local cache to be populated.
+	if err := informers.WaitForDynamicCacheSync(context.Background(), informerFactory); err != nil {
 		return nil, err
 	}
 
 	uc, err := newUnstructuredConverter()
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to setup Unstructured Converter")
+		return nil, fmt.Errorf("failed to setup Unstructured Converter: %w", err)
 	}
 
 	return &ambassadorHostSource{
 		dynamicKubeClient:      dynamicKubeClient,
 		kubeClient:             kubeClient,
 		namespace:              namespace,
+		annotationFilter:       annotationFilter,
 		ambassadorHostInformer: ambassadorHostInformer,
 		unstructuredConverter:  uc,
+		labelSelector:          labelSelector,
 	}, nil
 }
 
 // Endpoints returns endpoint objects for each host-target combination that should be processed.
 // Retrieves all Hosts in the source's namespace(s).
 func (sc *ambassadorHostSource) Endpoints(ctx context.Context) ([]*endpoint.Endpoint, error) {
-	hosts, err := sc.ambassadorHostInformer.Lister().ByNamespace(sc.namespace).List(labels.Everything())
+	hosts, err := sc.ambassadorHostInformer.Lister().ByNamespace(sc.namespace).List(sc.labelSelector)
 	if err != nil {
 		return nil, err
 	}
 
-	endpoints := []*endpoint.Endpoint{}
+	// Get a list of Ambassador Host resources
+	var ambassadorHosts []*ambassador.Host
 	for _, hostObj := range hosts {
 		unstructuredHost, ok := hostObj.(*unstructured.Unstructured)
 		if !ok {
@@ -123,7 +134,18 @@ func (sc *ambassadorHostSource) Endpoints(ctx context.Context) ([]*endpoint.Endp
 		if err != nil {
 			return nil, err
 		}
+		ambassadorHosts = append(ambassadorHosts, host)
+	}
 
+	// Filter Ambassador Hosts
+	ambassadorHosts, err = sc.filterByAnnotations(ambassadorHosts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to filter Ambassador Hosts by annotation: %w", err)
+	}
+
+	var endpoints []*endpoint.Endpoint
+
+	for _, host := range ambassadorHosts {
 		fullname := fmt.Sprintf("%s/%s", host.Namespace, host.Name)
 
 		// look for the "exernal-dns.ambassador-service" annotation. If it is not there then just ignore this `Host`
@@ -133,7 +155,7 @@ func (sc *ambassadorHostSource) Endpoints(ctx context.Context) ([]*endpoint.Endp
 			continue
 		}
 
-		targets := getTargetsFromTargetAnnotation(host.Annotations)
+		targets := annotations.TargetsFromTargetAnnotation(host.Annotations)
 		if len(targets) == 0 {
 			targets, err = sc.targetsFromAmbassadorLoadBalancer(ctx, service)
 			if err != nil {
@@ -142,7 +164,7 @@ func (sc *ambassadorHostSource) Endpoints(ctx context.Context) ([]*endpoint.Endp
 			}
 		}
 
-		hostEndpoints, err := sc.endpointsFromHost(ctx, host, targets)
+		hostEndpoints, err := sc.endpointsFromHost(host, targets)
 		if err != nil {
 			log.Warningf("Could not get endpoints for Host %s", err)
 			continue
@@ -164,16 +186,12 @@ func (sc *ambassadorHostSource) Endpoints(ctx context.Context) ([]*endpoint.Endp
 }
 
 // endpointsFromHost extracts the endpoints from a Host object
-func (sc *ambassadorHostSource) endpointsFromHost(ctx context.Context, host *ambassador.Host, targets endpoint.Targets) ([]*endpoint.Endpoint, error) {
+func (sc *ambassadorHostSource) endpointsFromHost(host *ambassador.Host, targets endpoint.Targets) ([]*endpoint.Endpoint, error) {
 	var endpoints []*endpoint.Endpoint
 
-	providerSpecific := endpoint.ProviderSpecific{}
-	setIdentifier := ""
-
 	resource := fmt.Sprintf("host/%s/%s", host.Namespace, host.Name)
-
-	annotations := host.Annotations
-	ttl := getTTLFromAnnotations(annotations, resource)
+	providerSpecific, setIdentifier := annotations.ProviderSpecificAnnotations(host.Annotations)
+	ttl := annotations.TTLFromAnnotations(host.Annotations, resource)
 
 	if host.Spec != nil {
 		hostname := host.Spec.Hostname
@@ -185,7 +203,7 @@ func (sc *ambassadorHostSource) endpointsFromHost(ctx context.Context, host *amb
 	return endpoints, nil
 }
 
-func (sc *ambassadorHostSource) targetsFromAmbassadorLoadBalancer(ctx context.Context, service string) (targets endpoint.Targets, err error) {
+func (sc *ambassadorHostSource) targetsFromAmbassadorLoadBalancer(ctx context.Context, service string) (endpoint.Targets, error) {
 	lbNamespace, lbName, err := parseAmbLoadBalancerService(service)
 	if err != nil {
 		return nil, err
@@ -196,16 +214,9 @@ func (sc *ambassadorHostSource) targetsFromAmbassadorLoadBalancer(ctx context.Co
 		return nil, err
 	}
 
-	for _, lb := range svc.Status.LoadBalancer.Ingress {
-		if lb.IP != "" {
-			targets = append(targets, lb.IP)
-		}
-		if lb.Hostname != "" {
-			targets = append(targets, lb.Hostname)
-		}
-	}
+	targets := extractLoadBalancerTargets(svc, false)
 
-	return
+	return targets, nil
 }
 
 // parseAmbLoadBalancerService returns a name/namespace tuple from the annotation in
@@ -251,7 +262,7 @@ func parseAmbLoadBalancerService(service string) (namespace, name string, err er
 	}
 
 	// If we got here, this string is simply ill-formatted. Return an error.
-	return "", "", errors.New(fmt.Sprintf("invalid external-dns service: %s", service))
+	return "", "", fmt.Errorf("invalid external-dns service: %s", service)
 }
 
 func (sc *ambassadorHostSource) AddEventHandler(ctx context.Context, handler func()) {
@@ -278,4 +289,35 @@ func newUnstructuredConverter() (*unstructuredConverter, error) {
 	}
 
 	return uc, nil
+}
+
+// Filter a list of Ambassador Host Resources to only return the ones that
+// contain the required External-DNS annotation filter
+func (sc *ambassadorHostSource) filterByAnnotations(ambassadorHosts []*ambassador.Host) ([]*ambassador.Host, error) {
+	// External-DNS Annotation Filter
+	labelSelector, err := metav1.ParseToLabelSelector(sc.annotationFilter)
+	if err != nil {
+		return nil, err
+	}
+
+	selector, err := metav1.LabelSelectorAsSelector(labelSelector)
+	if err != nil {
+		return nil, err
+	}
+
+	// empty filter returns original list of Ambassador Hosts
+	if selector.Empty() {
+		return ambassadorHosts, nil
+	}
+
+	// Return a filtered list of Ambassador Hosts
+	filteredList := []*ambassador.Host{}
+	for _, host := range ambassadorHosts {
+		// include Ambassador Host if its annotations match the annotation filter
+		if selector.Matches(labels.Set(host.Annotations)) {
+			filteredList = append(filteredList, host)
+		}
+	}
+
+	return filteredList, nil
 }

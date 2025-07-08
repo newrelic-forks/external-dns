@@ -37,7 +37,7 @@ import (
 )
 
 const (
-	googleRecordTTL = 300
+	defaultTTL = 300
 )
 
 type managedZonesCreateCallInterface interface {
@@ -109,7 +109,7 @@ type GoogleProvider struct {
 	// Interval between batch updates.
 	batchChangeInterval time.Duration
 	// only consider hosted zones managing domains ending in this suffix
-	domainFilter endpoint.DomainFilter
+	domainFilter *endpoint.DomainFilter
 	// filter for zones based on visibility
 	zoneTypeFilter provider.ZoneTypeFilter
 	// only consider hosted zones ending with this zone id
@@ -125,7 +125,7 @@ type GoogleProvider struct {
 }
 
 // NewGoogleProvider initializes a new Google CloudDNS based Provider.
-func NewGoogleProvider(ctx context.Context, project string, domainFilter endpoint.DomainFilter, zoneIDFilter provider.ZoneIDFilter, batchChangeSize int, batchChangeInterval time.Duration, zoneVisibility string, dryRun bool) (*GoogleProvider, error) {
+func NewGoogleProvider(ctx context.Context, project string, domainFilter *endpoint.DomainFilter, zoneIDFilter provider.ZoneIDFilter, batchChangeSize int, batchChangeInterval time.Duration, zoneVisibility string, dryRun bool) (*GoogleProvider, error) {
 	gcloud, err := google.DefaultClient(ctx, dns.NdevClouddnsReadwriteScope)
 	if err != nil {
 		return nil, err
@@ -144,7 +144,7 @@ func NewGoogleProvider(ctx context.Context, project string, domainFilter endpoin
 	}
 
 	if project == "" {
-		mProject, mErr := metadata.ProjectID()
+		mProject, mErr := metadata.ProjectIDWithContext(ctx)
 		if mErr != nil {
 			return nil, fmt.Errorf("failed to auto-detect the project id: %w", mErr)
 		}
@@ -154,7 +154,7 @@ func NewGoogleProvider(ctx context.Context, project string, domainFilter endpoin
 
 	zoneTypeFilter := provider.NewZoneTypeFilter(zoneVisibility)
 
-	provider := &GoogleProvider{
+	return &GoogleProvider{
 		project:                  project,
 		dryRun:                   dryRun,
 		batchChangeSize:          batchChangeSize,
@@ -166,9 +166,7 @@ func NewGoogleProvider(ctx context.Context, project string, domainFilter endpoin
 		managedZonesClient:       managedZonesService{dnsClient.ManagedZones},
 		changesClient:            changesService{dnsClient.Changes},
 		ctx:                      ctx,
-	}
-
-	return provider, nil
+	}, nil
 }
 
 // Zones returns the list of hosted zones.
@@ -194,7 +192,7 @@ func (p *GoogleProvider) Zones(ctx context.Context) (map[string]*dns.ManagedZone
 
 	log.Debugf("Matching zones against domain filters: %v", p.domainFilter)
 	if err := p.managedZonesClient.List(p.project).Pages(ctx, f); err != nil {
-		return nil, err
+		return nil, provider.NewSoftError(fmt.Errorf("failed to list zones: %w", err))
 	}
 
 	if len(zones) == 0 {
@@ -228,39 +226,11 @@ func (p *GoogleProvider) Records(ctx context.Context) (endpoints []*endpoint.End
 
 	for _, z := range zones {
 		if err := p.resourceRecordSetsClient.List(p.project, z.Name).Pages(ctx, f); err != nil {
-			return nil, err
+			return nil, provider.NewSoftError(fmt.Errorf("failed to list records in zone %s: %w", z.Name, err))
 		}
 	}
 
 	return endpoints, nil
-}
-
-// CreateRecords creates a given set of DNS records in the given hosted zone.
-func (p *GoogleProvider) CreateRecords(endpoints []*endpoint.Endpoint) error {
-	change := &dns.Change{}
-
-	change.Additions = append(change.Additions, p.newFilteredRecords(endpoints)...)
-
-	return p.submitChange(p.ctx, change)
-}
-
-// UpdateRecords updates a given set of old records to a new set of records in a given hosted zone.
-func (p *GoogleProvider) UpdateRecords(records, oldRecords []*endpoint.Endpoint) error {
-	change := &dns.Change{}
-
-	change.Additions = append(change.Additions, p.newFilteredRecords(records)...)
-	change.Deletions = append(change.Deletions, p.newFilteredRecords(oldRecords)...)
-
-	return p.submitChange(p.ctx, change)
-}
-
-// DeleteRecords deletes a given set of DNS records in a given zone.
-func (p *GoogleProvider) DeleteRecords(endpoints []*endpoint.Endpoint) error {
-	change := &dns.Change{}
-
-	change.Deletions = append(change.Deletions, p.newFilteredRecords(endpoints)...)
-
-	return p.submitChange(p.ctx, change)
 }
 
 // ApplyChanges applies a given set of changes in a given zone.
@@ -289,11 +259,11 @@ func (p *GoogleProvider) SupportedRecordType(recordType string) bool {
 
 // newFilteredRecords returns a collection of RecordSets based on the given endpoints and domainFilter.
 func (p *GoogleProvider) newFilteredRecords(endpoints []*endpoint.Endpoint) []*dns.ResourceRecordSet {
-	records := []*dns.ResourceRecordSet{}
+	var records []*dns.ResourceRecordSet
 
-	for _, endpoint := range endpoints {
-		if p.domainFilter.Match(endpoint.DNSName) {
-			records = append(records, newRecord(endpoint))
+	for _, ep := range endpoints {
+		if p.domainFilter.Match(ep.DNSName) {
+			records = append(records, newRecord(ep))
 		}
 	}
 
@@ -330,7 +300,7 @@ func (p *GoogleProvider) submitChange(ctx context.Context, change *dns.Change) e
 			}
 
 			if _, err := p.changesClient.Create(p.project, zone, c).Do(); err != nil {
-				return err
+				return provider.NewSoftError(fmt.Errorf("failed to create changes: %w", err))
 			}
 
 			time.Sleep(p.batchChangeInterval)
@@ -342,7 +312,7 @@ func (p *GoogleProvider) submitChange(ctx context.Context, change *dns.Change) e
 
 // batchChange separates a zone in multiple transaction.
 func batchChange(change *dns.Change, batchSize int) []*dns.Change {
-	changes := []*dns.Change{}
+	var changes []*dns.Change
 
 	if batchSize == 0 {
 		return append(changes, change)
@@ -467,8 +437,20 @@ func newRecord(ep *endpoint.Endpoint) *dns.ResourceRecordSet {
 		}
 	}
 
+	if ep.RecordType == endpoint.RecordTypeSRV {
+		for i, srvRecord := range ep.Targets {
+			targets[i] = provider.EnsureTrailingDot(srvRecord)
+		}
+	}
+
+	if ep.RecordType == endpoint.RecordTypeNS {
+		for i, nsRecord := range ep.Targets {
+			targets[i] = provider.EnsureTrailingDot(nsRecord)
+		}
+	}
+
 	// no annotation results in a Ttl of 0, default to 300 for backwards-compatibility
-	var ttl int64 = googleRecordTTL
+	var ttl int64 = defaultTTL
 	if ep.RecordTTL.IsConfigured() {
 		ttl = int64(ep.RecordTTL)
 	}

@@ -19,6 +19,7 @@ package source
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"sort"
 	"strings"
 	"text/template"
@@ -31,13 +32,17 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	kubeinformers "k8s.io/client-go/informers"
 	coreinformers "k8s.io/client-go/informers/core/v1"
-	cache "k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/tools/cache"
+	v1 "sigs.k8s.io/gateway-api/apis/v1"
 	"sigs.k8s.io/gateway-api/apis/v1beta1"
 	gateway "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
-	informers "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions"
-	informers_v1b1 "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions/apis/v1beta1"
+	gwinformers "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions"
+	informers_v1beta1 "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions/apis/v1beta1"
 
 	"sigs.k8s.io/external-dns/endpoint"
+	"sigs.k8s.io/external-dns/source/annotations"
+	"sigs.k8s.io/external-dns/source/fqdn"
+	"sigs.k8s.io/external-dns/source/informers"
 )
 
 const (
@@ -51,38 +56,41 @@ type gatewayRoute interface {
 	// Metadata returns the route's metadata.
 	Metadata() *metav1.ObjectMeta
 	// Hostnames returns the route's specified hostnames.
-	Hostnames() []v1beta1.Hostname
+	Hostnames() []v1.Hostname
+	// ParentRefs returns the route's parent references as defined in the route spec.
+	ParentRefs() []v1.ParentReference
 	// Protocol returns the route's protocol type.
-	Protocol() v1beta1.ProtocolType
+	Protocol() v1.ProtocolType
 	// RouteStatus returns the route's common status.
-	RouteStatus() v1beta1.RouteStatus
+	RouteStatus() v1.RouteStatus
 }
 
-type newGatewayRouteInformerFunc func(informers.SharedInformerFactory) gatewayRouteInformer
+type newGatewayRouteInformerFunc func(gwinformers.SharedInformerFactory) gatewayRouteInformer
 
 type gatewayRouteInformer interface {
 	List(namespace string, selector labels.Selector) ([]gatewayRoute, error)
 	Informer() cache.SharedIndexInformer
 }
 
-func newGatewayInformerFactory(client gateway.Interface, namespace string, labelSelector labels.Selector) informers.SharedInformerFactory {
-	var opts []informers.SharedInformerOption
+func newGatewayInformerFactory(client gateway.Interface, namespace string, labelSelector labels.Selector) gwinformers.SharedInformerFactory {
+	var opts []gwinformers.SharedInformerOption
 	if namespace != "" {
-		opts = append(opts, informers.WithNamespace(namespace))
+		opts = append(opts, gwinformers.WithNamespace(namespace))
 	}
 	if labelSelector != nil && !labelSelector.Empty() {
 		lbls := labelSelector.String()
-		opts = append(opts, informers.WithTweakListOptions(func(o *metav1.ListOptions) {
+		opts = append(opts, gwinformers.WithTweakListOptions(func(o *metav1.ListOptions) {
 			o.LabelSelector = lbls
 		}))
 	}
-	return informers.NewSharedInformerFactoryWithOptions(client, 0, opts...)
+	return gwinformers.NewSharedInformerFactoryWithOptions(client, 0, opts...)
 }
 
 type gatewayRouteSource struct {
+	gwName      string
 	gwNamespace string
 	gwLabels    labels.Selector
-	gwInformer  informers_v1b1.GatewayInformer
+	gwInformer  informers_v1beta1.GatewayInformer
 
 	rtKind        string
 	rtNamespace   string
@@ -112,7 +120,7 @@ func newGatewayRouteSource(clients ClientGenerator, config *Config, kind string,
 	if err != nil {
 		return nil, err
 	}
-	tmpl, err := parseTemplate(config.FQDNTemplate)
+	tmpl, err := fqdn.ParseTemplate(config.FQDNTemplate)
 	if err != nil {
 		return nil, err
 	}
@@ -147,18 +155,19 @@ func newGatewayRouteSource(clients ClientGenerator, config *Config, kind string,
 	if rtInformerFactory != informerFactory {
 		rtInformerFactory.Start(wait.NeverStop)
 
-		if err := waitForCacheSync(ctx, rtInformerFactory); err != nil {
+		if err := informers.WaitForCacheSync(ctx, rtInformerFactory); err != nil {
 			return nil, err
 		}
 	}
-	if err := waitForCacheSync(ctx, informerFactory); err != nil {
+	if err := informers.WaitForCacheSync(ctx, informerFactory); err != nil {
 		return nil, err
 	}
-	if err := waitForCacheSync(ctx, kubeInformerFactory); err != nil {
+	if err := informers.WaitForCacheSync(ctx, kubeInformerFactory); err != nil {
 		return nil, err
 	}
 
 	src := &gatewayRouteSource{
+		gwName:      config.GatewayName,
 		gwNamespace: config.GatewayNamespace,
 		gwLabels:    gwLabels,
 		gwInformer:  gwInformer,
@@ -228,13 +237,16 @@ func (src *gatewayRouteSource) Endpoints(ctx context.Context) ([]*endpoint.Endpo
 		}
 
 		// Create endpoints from hostnames and targets.
+		var routeEndpoints []*endpoint.Endpoint
 		resource := fmt.Sprintf("%s/%s/%s", kind, meta.Namespace, meta.Name)
-		providerSpecific, setIdentifier := getProviderSpecificAnnotations(annots)
-		ttl := getTTLFromAnnotations(annots, resource)
+		providerSpecific, setIdentifier := annotations.ProviderSpecificAnnotations(annots)
+		ttl := annotations.TTLFromAnnotations(annots, resource)
 		for host, targets := range hostTargets {
-			endpoints = append(endpoints, endpointsForHostname(host, targets, ttl, providerSpecific, setIdentifier, resource)...)
+			routeEndpoints = append(routeEndpoints, endpointsForHostname(host, targets, ttl, providerSpecific, setIdentifier, resource)...)
 		}
-		log.Debugf("Endpoints generated from %s %s/%s: %v", src.rtKind, meta.Namespace, meta.Name, endpoints)
+		log.Debugf("Endpoints generated from %s %s/%s: %v", src.rtKind, meta.Namespace, meta.Name, routeEndpoints)
+
+		endpoints = append(endpoints, routeEndpoints...)
 	}
 	return endpoints, nil
 }
@@ -251,14 +263,14 @@ type gatewayRouteResolver struct {
 
 type gatewayListeners struct {
 	gateway   *v1beta1.Gateway
-	listeners map[v1beta1.SectionName][]v1beta1.Listener
+	listeners map[v1.SectionName][]v1.Listener
 }
 
 func newGatewayRouteResolver(src *gatewayRouteSource, gateways []*v1beta1.Gateway, namespaces []*corev1.Namespace) *gatewayRouteResolver {
 	// Create Gateway Listener lookup table.
 	gws := make(map[types.NamespacedName]gatewayListeners, len(gateways))
 	for _, gw := range gateways {
-		lss := make(map[v1beta1.SectionName][]v1beta1.Listener, len(gw.Spec.Listeners)+1)
+		lss := make(map[v1.SectionName][]v1.Listener, len(gw.Spec.Listeners)+1)
 		for i, lis := range gw.Spec.Listeners {
 			lss[lis.Name] = gw.Spec.Listeners[i : i+1]
 		}
@@ -287,10 +299,24 @@ func (c *gatewayRouteResolver) resolve(rt gatewayRoute) (map[string]endpoint.Tar
 	}
 	hostTargets := make(map[string]endpoint.Targets)
 
+	routeParentRefs := rt.ParentRefs()
+
+	if len(routeParentRefs) == 0 {
+		log.Debugf("No parent references found for %s %s/%s", c.src.rtKind, rt.Metadata().Namespace, rt.Metadata().Name)
+		return hostTargets, nil
+	}
+
 	meta := rt.Metadata()
 	for _, rps := range rt.RouteStatus().Parents {
 		// Confirm the Parent is the standard Gateway kind.
 		ref := rps.ParentRef
+		namespace := strVal((*string)(ref.Namespace), meta.Namespace)
+		// Ensure that the parent reference is in the routeParentRefs list
+		if !gwRouteHasParentRef(routeParentRefs, ref, meta) {
+			log.Debugf("Parent reference %s/%s not found in routeParentRefs for %s %s/%s", namespace, string(ref.Name), c.src.rtKind, meta.Namespace, meta.Name)
+			continue
+		}
+
 		group := strVal((*string)(ref.Group), gatewayGroup)
 		kind := strVal((*string)(ref.Kind), gatewayKind)
 		if group != gatewayGroup || kind != gatewayKind {
@@ -298,17 +324,23 @@ func (c *gatewayRouteResolver) resolve(rt gatewayRoute) (map[string]endpoint.Tar
 			continue
 		}
 		// Lookup the Gateway and its Listeners.
-		namespace := strVal((*string)(ref.Namespace), meta.Namespace)
 		gw, ok := c.gws[namespacedName(namespace, string(ref.Name))]
 		if !ok {
 			log.Debugf("Gateway %s/%s not found for %s %s/%s", namespace, ref.Name, c.src.rtKind, meta.Namespace, meta.Name)
 			continue
 		}
-		// Confirm the Gateway has accepted the Route.
-		if !gwRouteIsAccepted(rps.Conditions) {
-			log.Debugf("Gateway %s/%s has not accepted %s %s/%s", namespace, ref.Name, c.src.rtKind, meta.Namespace, meta.Name)
+		// Confirm the Gateway has the correct name, if specified.
+		if c.src.gwName != "" && c.src.gwName != gw.gateway.Name {
+			log.Debugf("Gateway %s/%s does not match %s %s/%s", namespace, ref.Name, c.src.gwName, meta.Namespace, meta.Name)
 			continue
 		}
+
+		// Confirm the Gateway has accepted the Route.
+		if !gwRouteIsAccepted(rps.Conditions) {
+			log.Debugf("Gateway %s/%s has not accepted the current generation %s %s/%s", namespace, ref.Name, c.src.rtKind, meta.Namespace, meta.Name)
+			continue
+		}
+
 		// Match the Route to all possible Listeners.
 		match := false
 		section := sectionVal(ref.SectionName, "")
@@ -345,7 +377,7 @@ func (c *gatewayRouteResolver) resolve(rt gatewayRoute) (map[string]endpoint.Tar
 				if !ok {
 					continue
 				}
-				override := getTargetsFromTargetAnnotation(gw.gateway.Annotations)
+				override := annotations.TargetsFromTargetAnnotation(gw.gateway.Annotations)
 				hostTargets[host] = append(hostTargets[host], override...)
 				if len(override) == 0 {
 					for _, addr := range gw.gateway.Status.Addresses {
@@ -375,11 +407,11 @@ func (c *gatewayRouteResolver) hosts(rt gatewayRoute) ([]string, error) {
 	// TODO: The ignore-hostname-annotation flag help says "valid only when using fqdn-template"
 	// but other sources don't check if fqdn-template is set. Which should it be?
 	if !c.src.ignoreHostnameAnnotation {
-		hostnames = append(hostnames, getHostnamesFromAnnotations(rt.Metadata().Annotations)...)
+		hostnames = append(hostnames, annotations.HostnamesFromAnnotations(rt.Metadata().Annotations)...)
 	}
 	// TODO: The combine-fqdn-annotation flag is similarly vague.
 	if c.src.fqdnTemplate != nil && (len(hostnames) == 0 || c.src.combineFQDNAnnotation) {
-		hosts, err := execTemplate(c.src.fqdnTemplate, rt.Object())
+		hosts, err := fqdn.ExecTemplate(c.src.fqdnTemplate, rt.Object())
 		if err != nil {
 			return nil, err
 		}
@@ -394,23 +426,23 @@ func (c *gatewayRouteResolver) hosts(rt gatewayRoute) ([]string, error) {
 	return hostnames, nil
 }
 
-func (c *gatewayRouteResolver) routeIsAllowed(gw *v1beta1.Gateway, lis *v1beta1.Listener, rt gatewayRoute) bool {
+func (c *gatewayRouteResolver) routeIsAllowed(gw *v1beta1.Gateway, lis *v1.Listener, rt gatewayRoute) bool {
 	meta := rt.Metadata()
 	allow := lis.AllowedRoutes
 
 	// Check the route's namespace.
-	from := v1beta1.NamespacesFromSame
+	from := v1.NamespacesFromSame
 	if allow != nil && allow.Namespaces != nil && allow.Namespaces.From != nil {
 		from = *allow.Namespaces.From
 	}
 	switch from {
-	case v1beta1.NamespacesFromAll:
+	case v1.NamespacesFromAll:
 		// OK
-	case v1beta1.NamespacesFromSame:
+	case v1.NamespacesFromSame:
 		if gw.Namespace != meta.Namespace {
 			return false
 		}
-	case v1beta1.NamespacesFromSelector:
+	case v1.NamespacesFromSelector:
 		selector, err := metav1.LabelSelectorAsSelector(allow.Namespaces.Selector)
 		if err != nil {
 			log.Debugf("Gateway %s/%s section %q has invalid namespace selector: %v", gw.Namespace, gw.Name, lis.Name, err)
@@ -446,9 +478,29 @@ func (c *gatewayRouteResolver) routeIsAllowed(gw *v1beta1.Gateway, lis *v1beta1.
 	return false
 }
 
+func gwRouteHasParentRef(routeParentRefs []v1.ParentReference, ref v1.ParentReference, meta *metav1.ObjectMeta) bool {
+	// Ensure that the parent reference is in the routeParentRefs list
+	namespace := strVal((*string)(ref.Namespace), meta.Namespace)
+	group := strVal((*string)(ref.Group), gatewayGroup)
+	kind := strVal((*string)(ref.Kind), gatewayKind)
+	for _, rpr := range routeParentRefs {
+		rprGroup := strVal((*string)(rpr.Group), gatewayGroup)
+		rprKind := strVal((*string)(rpr.Kind), gatewayKind)
+		if rprGroup != group || rprKind != kind {
+			continue
+		}
+		rprNamespace := strVal((*string)(rpr.Namespace), meta.Namespace)
+		if string(rpr.Name) != string(ref.Name) || rprNamespace != namespace {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 func gwRouteIsAccepted(conds []metav1.Condition) bool {
 	for _, c := range conds {
-		if v1beta1.RouteConditionType(c.Type) == v1beta1.RouteConditionAccepted {
+		if v1.RouteConditionType(c.Type) == v1.RouteConditionAccepted {
 			return c.Status == metav1.ConditionTrue
 		}
 	}
@@ -475,50 +527,105 @@ func uniqueTargets(targets endpoint.Targets) endpoint.Targets {
 
 // gwProtocolMatches returns whether a and b are the same protocol,
 // where HTTP and HTTPS are considered the same.
-func gwProtocolMatches(a, b v1beta1.ProtocolType) bool {
-	if a == v1beta1.HTTPSProtocolType {
-		a = v1beta1.HTTPProtocolType
+// and TLS and TCP are considered the same.
+func gwProtocolMatches(a, b v1.ProtocolType) bool {
+	if a == v1.HTTPSProtocolType {
+		a = v1.HTTPProtocolType
 	}
-	if b == v1beta1.HTTPSProtocolType {
-		b = v1beta1.HTTPProtocolType
+	if b == v1.HTTPSProtocolType {
+		b = v1.HTTPProtocolType
+	}
+	// if Listener is TLS and Route is TCP set Listener type to TCP as to pass true and return valid match
+	if a == v1.TCPProtocolType && b == v1.TLSProtocolType {
+		b = v1.TCPProtocolType
 	}
 	return a == b
 }
 
 // gwMatchingHost returns the most-specific overlapping host and a bool indicating if one was found.
-// For example, if one host is "*.foo.com" and the other is "bar.foo.com", "bar.foo.com" will be returned.
-// An empty string matches anything.
-func gwMatchingHost(gwHost, rtHost string) (string, bool) {
-	gwHost = toLowerCaseASCII(gwHost) // TODO: trim "." suffix?
-	rtHost = toLowerCaseASCII(rtHost) // TODO: trim "." suffix?
-
-	if gwHost == "" {
-		return rtHost, true
+// Hostnames that are prefixed with a wildcard label (`*.`) are interpreted as a suffix match.
+// That means that "*.example.com" would match both "test.example.com" and "foo.test.example.com",
+// but not "example.com". An empty string matches anything.
+func gwMatchingHost(a, b string) (string, bool) {
+	var ok bool
+	if a, ok = gwHost(a); !ok {
+		return "", false
 	}
-	if rtHost == "" {
-		return gwHost, true
-	}
-
-	gwParts := strings.Split(gwHost, ".")
-	rtParts := strings.Split(rtHost, ".")
-	if len(gwParts) != len(rtParts) {
+	if b, ok = gwHost(b); !ok {
 		return "", false
 	}
 
-	host := rtHost
-	for i, gwPart := range gwParts {
-		switch rtPart := rtParts[i]; {
-		case rtPart == gwPart:
-			// continue
-		case i == 0 && gwPart == "*":
-			// continue
-		case i == 0 && rtPart == "*":
-			host = gwHost // gwHost is more specific
-		default:
-			return "", false
+	if a == "" {
+		return b, true
+	}
+	if b == "" || a == b {
+		return a, true
+	}
+	if na, nb := len(a), len(b); nb < na || (na == nb && strings.HasPrefix(b, "*.")) {
+		a, b = b, a
+	}
+	if strings.HasPrefix(a, "*.") && strings.HasSuffix(b, a[1:]) {
+		return b, true
+	}
+	return "", false
+}
+
+// gwHost returns the canonical host and a value indicating if it's valid.
+func gwHost(host string) (string, bool) {
+	if host == "" {
+		return "", true
+	}
+	if isIPAddr(host) || !isDNS1123Domain(strings.TrimPrefix(host, "*.")) {
+		return "", false
+	}
+	return toLowerCaseASCII(host), true
+}
+
+// isIPAddr returns whether s in an IP address.
+func isIPAddr(s string) bool {
+	_, err := netip.ParseAddr(s)
+	return err == nil
+}
+
+// isDNS1123Domain returns whether s is a valid domain name according to RFC 1123.
+func isDNS1123Domain(s string) bool {
+	if n := len(s); n == 0 || n > 255 {
+		return false
+	}
+	for lbl, rest := "", s; rest != ""; {
+		if lbl, rest, _ = strings.Cut(rest, "."); !isDNS1123Label(lbl) {
+			return false
 		}
 	}
-	return host, true
+	return true
+}
+
+// isDNS1123Label returns whether s is a valid domain label according to RFC 1123.
+func isDNS1123Label(s string) bool {
+	n := len(s)
+	if n == 0 || n > 63 {
+		return false
+	}
+	if !isAlphaNum(s[0]) || !isAlphaNum(s[n-1]) {
+		return false
+	}
+	for i, k := 1, n-1; i < k; i++ {
+		if b := s[i]; b != '-' && !isAlphaNum(b) {
+			return false
+		}
+	}
+	return true
+}
+
+func isAlphaNum(b byte) bool {
+	switch {
+	case 'a' <= b && b <= 'z',
+		'A' <= b && b <= 'Z',
+		'0' <= b && b <= '9':
+		return true
+	default:
+		return false
+	}
 }
 
 func strVal(ptr *string, def string) string {
@@ -528,7 +635,7 @@ func strVal(ptr *string, def string) string {
 	return *ptr
 }
 
-func sectionVal(ptr *v1beta1.SectionName, def v1beta1.SectionName) v1beta1.SectionName {
+func sectionVal(ptr *v1.SectionName, def v1.SectionName) v1.SectionName {
 	if ptr == nil || *ptr == "" {
 		return def
 	}

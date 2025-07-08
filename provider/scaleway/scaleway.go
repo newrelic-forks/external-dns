@@ -34,7 +34,7 @@ import (
 )
 
 const (
-	scalewyRecordTTL        uint32 = 300
+	defaultTTL              uint32 = 300
 	scalewayDefaultPriority uint32 = 0
 	scalewayPriorityKey     string = "scw/priority"
 )
@@ -45,7 +45,7 @@ type ScalewayProvider struct {
 	domainAPI DomainAPI
 	dryRun    bool
 	// only consider hosted zones managing domains ending in this suffix
-	domainFilter endpoint.DomainFilter
+	domainFilter *endpoint.DomainFilter
 }
 
 // ScalewayChange differentiates between ChangActions
@@ -55,7 +55,7 @@ type ScalewayChange struct {
 }
 
 // NewScalewayProvider initializes a new Scaleway DNS provider
-func NewScalewayProvider(ctx context.Context, domainFilter endpoint.DomainFilter, dryRun bool) (*ScalewayProvider, error) {
+func NewScalewayProvider(ctx context.Context, domainFilter *endpoint.DomainFilter, dryRun bool) (*ScalewayProvider, error) {
 	var err error
 	defaultPageSize := uint64(1000)
 	if envPageSize, ok := os.LookupEnv("SCW_DEFAULT_PAGE_SIZE"); ok {
@@ -65,9 +65,22 @@ func NewScalewayProvider(ctx context.Context, domainFilter endpoint.DomainFilter
 			defaultPageSize = 1000
 		}
 	}
+
+	p := &scw.Profile{}
+	c, err := scw.LoadConfig()
+	if err != nil {
+		log.Warnf("Cannot load config: %v", err)
+	} else {
+		p, err = c.GetActiveProfile()
+		if err != nil {
+			log.Warnf("Cannot get active profile: %v", err)
+		}
+	}
+
 	scwClient, err := scw.NewClient(
+		scw.WithProfile(p),
 		scw.WithEnv(),
-		scw.WithUserAgent("ExternalDNS/"+externaldns.Version),
+		scw.WithUserAgent(externaldns.UserAgent()),
 		scw.WithDefaultPageSize(uint32(defaultPageSize)),
 	)
 	if err != nil {
@@ -97,7 +110,7 @@ func (p *ScalewayProvider) AdjustEndpoints(endpoints []*endpoint.Endpoint) ([]*e
 	for i := range endpoints {
 		eps[i] = endpoints[i]
 		if !eps[i].RecordTTL.IsConfigured() {
-			eps[i].RecordTTL = endpoint.TTL(scalewyRecordTTL)
+			eps[i].RecordTTL = endpoint.TTL(defaultTTL)
 		}
 		if _, ok := eps[i].GetProviderSpecificProperty(scalewayPriorityKey); !ok {
 			eps[i] = eps[i].WithProviderSpecific(scalewayPriorityKey, fmt.Sprintf("%d", scalewayDefaultPriority))
@@ -287,7 +300,7 @@ func getCompleteZoneName(zone *domain.DNSZone) string {
 
 func endpointToScalewayRecords(zoneName string, ep *endpoint.Endpoint) []*domain.Record {
 	// no annotation results in a TTL of 0, default to 300 for consistency with other providers
-	ttl := scalewyRecordTTL
+	ttl := defaultTTL
 	if ep.RecordTTL.IsConfigured() {
 		ttl = uint32(ep.RecordTTL)
 	}

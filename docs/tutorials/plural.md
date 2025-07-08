@@ -1,4 +1,4 @@
-# Setting up ExternalDNS for Services on Plural
+# Plural
 
 This tutorial describes how to setup ExternalDNS for usage within a Kubernetes cluster using Plural DNS.
 
@@ -14,6 +14,32 @@ To create the secret you can run `kubectl create secret generic plural-env --fro
 
 Connect your `kubectl` client to the cluster you want to test ExternalDNS with.
 Then apply one of the following manifests file to deploy ExternalDNS.
+
+## Using Helm
+
+Create a values.yaml file to configure ExternalDNS to use plural DNS as the DNS provider. This file should include the necessary environment variables:
+
+```shell
+provider:
+  name: plural
+extraArgs:
+  - --plural-cluster=example-plural-cluster
+  - --plural-provider=aws # gcp, azure, equinix and kind are also possible
+env:
+  - name: PLURAL_ACCESS_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: PLURAL_ACCESS_TOKEN
+        key: plural-env
+  - name: PLURAL_ENDPOINT
+    value: https://app.plural.sh
+```
+
+Finally, install the ExternalDNS chart with Helm using the configuration specified in your values.yaml file:
+
+```shell
+helm upgrade --install external-dns external-dns/external-dns --values values.yaml
+```
 
 ### Manifest (for clusters without RBAC enabled)
 
@@ -35,7 +61,7 @@ spec:
     spec:
       containers:
       - name: external-dns
-        image: registry.k8s.io/external-dns/external-dns:v0.13.5
+        image: registry.k8s.io/external-dns/external-dns:v0.17.0
         args:
         - --source=service # ingress is also possible
         - --domain-filter=example.com # (optional) limit to only example.com domains; change to match the zone created above.
@@ -69,7 +95,7 @@ rules:
   resources: ["services","endpoints","pods"]
   verbs: ["get","watch","list"]
 - apiGroups: ["extensions","networking.k8s.io"]
-  resources: ["ingresses"] 
+  resources: ["ingresses"]
   verbs: ["get","watch","list"]
 - apiGroups: [""]
   resources: ["nodes"]
@@ -105,7 +131,7 @@ spec:
     spec:
       containers:
       - name: external-dns
-        image: registry.k8s.io/external-dns/external-dns:v0.13.5
+        image: registry.k8s.io/external-dns/external-dns:v0.17.0
         args:
         - --source=service # ingress is also possible
         - --domain-filter=example.com # (optional) limit to only example.com domains; change to match the zone created above.
@@ -173,8 +199,8 @@ will cause ExternalDNS to remove the corresponding DNS records.
 
 Create the deployment and service:
 
-```
-$ kubectl create -f nginx.yaml
+```sh
+kubectl create -f nginx.yaml
 ```
 
 Depending where you run your service it can take a little while for your cloud provider to create an external IP for the service.
@@ -192,6 +218,6 @@ The records should show the external IP address of the service as the A record f
 
 Now that we have verified that ExternalDNS will automatically manage Plural DNS records, we can delete the tutorial's example:
 
-```
-$ kubectl delete -f nginx.yaml
-$ kubectl delete -f externaldns.yaml
+```sh
+kubectl delete -f nginx.yaml
+kubectl delete -f externaldns.yaml

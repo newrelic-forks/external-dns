@@ -18,11 +18,11 @@ package source
 
 import (
 	"context"
+	"errors"
 	"testing"
 
-	"github.com/pkg/errors"
-	"github.com/stretchr/testify/assert"
 	"sigs.k8s.io/external-dns/endpoint"
+	"sigs.k8s.io/external-dns/source/fqdn"
 )
 
 func createTestRouteGroup(ns, name string, annotations map[string]string, hosts []string, destinations []routeGroupLoadBalancer) *routeGroup {
@@ -197,6 +197,28 @@ func TestEndpointsFromRouteGroups(t *testing.T) {
 			},
 		},
 		{
+			name:   "Routegroup with hosts and destination IPv6 creates an endpoint",
+			source: &routeGroupSource{},
+			rg: createTestRouteGroup(
+				"namespace1",
+				"rg1",
+				nil,
+				[]string{"rg1.k8s.example"},
+				[]routeGroupLoadBalancer{
+					{
+						IP: "2001:DB8::1",
+					},
+				},
+			),
+			want: []*endpoint.Endpoint{
+				{
+					DNSName:    "rg1.k8s.example",
+					RecordType: endpoint.RecordTypeAAAA,
+					Targets:    endpoint.Targets([]string{"2001:DB8::1"}),
+				},
+			},
+		},
+		{
 			name:   "Routegroup with hosts and mixed destinations creates endpoints",
 			source: &routeGroupSource{},
 			rg: createTestRouteGroup(
@@ -216,6 +238,34 @@ func TestEndpointsFromRouteGroups(t *testing.T) {
 					DNSName:    "rg1.k8s.example",
 					RecordType: endpoint.RecordTypeA,
 					Targets:    endpoint.Targets([]string{"1.5.1.4"}),
+				},
+				{
+					DNSName:    "rg1.k8s.example",
+					RecordType: endpoint.RecordTypeCNAME,
+					Targets:    endpoint.Targets([]string{"lb.example.org"}),
+				},
+			},
+		},
+		{
+			name:   "Routegroup with hosts and mixed destinations (IPv6) creates endpoints",
+			source: &routeGroupSource{},
+			rg: createTestRouteGroup(
+				"namespace1",
+				"rg1",
+				nil,
+				[]string{"rg1.k8s.example"},
+				[]routeGroupLoadBalancer{
+					{
+						Hostname: "lb.example.org",
+						IP:       "2001:DB8::1",
+					},
+				},
+			),
+			want: []*endpoint.Endpoint{
+				{
+					DNSName:    "rg1.k8s.example",
+					RecordType: endpoint.RecordTypeAAAA,
+					Targets:    endpoint.Targets([]string{"2001:DB8::1"}),
 				},
 				{
 					DNSName:    "rg1.k8s.example",
@@ -738,7 +788,7 @@ func TestRouteGroupsEndpoints(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.fqdnTemplate != "" {
-				tmpl, err := parseTemplate(tt.fqdnTemplate)
+				tmpl, err := fqdn.ParseTemplate(tt.fqdnTemplate)
 				if err != nil {
 					t.Fatalf("Failed to parse template: %v", err)
 				}
@@ -784,86 +834,5 @@ func TestResourceLabelIsSet(t *testing.T) {
 		if _, ok := ep.Labels[endpoint.ResourceLabelKey]; !ok {
 			t.Errorf("Failed to set resource label on ep %v", ep)
 		}
-	}
-}
-
-func TestDualstackLabelIsSet(t *testing.T) {
-	source := &routeGroupSource{
-		cli: &fakeRouteGroupClient{
-			rg: &routeGroupList{
-				Items: []*routeGroup{
-					createTestRouteGroup(
-						"namespace1",
-						"rg1",
-						map[string]string{
-							ALBDualstackAnnotationKey: ALBDualstackAnnotationValue,
-						},
-						[]string{"rg1.k8s.example"},
-						[]routeGroupLoadBalancer{
-							{
-								Hostname: "lb.example.org",
-							},
-						},
-					),
-				},
-			},
-		},
-	}
-
-	got, _ := source.Endpoints(context.Background())
-	for _, ep := range got {
-		if v, ok := ep.Labels[endpoint.DualstackLabelKey]; !ok || v != "true" {
-			t.Errorf("Failed to set resource label on ep %v", ep)
-		}
-	}
-}
-
-func TestParseTemplate(t *testing.T) {
-	for _, tt := range []struct {
-		name                     string
-		annotationFilter         string
-		fqdnTemplate             string
-		combineFQDNAndAnnotation bool
-		expectError              bool
-	}{
-		{
-			name:         "invalid template",
-			expectError:  true,
-			fqdnTemplate: "{{.Name",
-		},
-		{
-			name:        "valid empty template",
-			expectError: false,
-		},
-		{
-			name:         "valid template",
-			expectError:  false,
-			fqdnTemplate: "{{.Name}}-{{.Namespace}}.ext-dns.test.com",
-		},
-		{
-			name:         "valid template",
-			expectError:  false,
-			fqdnTemplate: "{{.Name}}-{{.Namespace}}.ext-dns.test.com, {{.Name}}-{{.Namespace}}.ext-dna.test.com",
-		},
-		{
-			name:                     "valid template",
-			expectError:              false,
-			fqdnTemplate:             "{{.Name}}-{{.Namespace}}.ext-dns.test.com, {{.Name}}-{{.Namespace}}.ext-dna.test.com",
-			combineFQDNAndAnnotation: true,
-		},
-		{
-			name:             "non-empty annotation filter label",
-			expectError:      false,
-			annotationFilter: "kubernetes.io/ingress.class=nginx",
-		},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := parseTemplate(tt.fqdnTemplate)
-			if tt.expectError {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
-			}
-		})
 	}
 }

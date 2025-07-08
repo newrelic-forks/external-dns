@@ -18,11 +18,11 @@ package plan
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/google/go-cmp/cmp"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/net/idna"
 
 	"sigs.k8s.io/external-dns/endpoint"
 )
@@ -55,13 +55,13 @@ type Plan struct {
 // Changes holds lists of actions to be executed by dns providers
 type Changes struct {
 	// Records that need to be created
-	Create []*endpoint.Endpoint
+	Create []*endpoint.Endpoint `json:"create,omitempty"`
 	// Records that need to be updated (current data)
-	UpdateOld []*endpoint.Endpoint
+	UpdateOld []*endpoint.Endpoint `json:"updateOld,omitempty"`
 	// Records that need to be updated (desired data)
-	UpdateNew []*endpoint.Endpoint
+	UpdateNew []*endpoint.Endpoint `json:"updateNew,omitempty"`
 	// Records that need to be deleted
-	Delete []*endpoint.Endpoint
+	Delete []*endpoint.Endpoint `json:"delete,omitempty"`
 }
 
 // planKey is a key for a row in `planTable`.
@@ -124,13 +124,13 @@ func (t planTableRow) String() string {
 	return fmt.Sprintf("planTableRow{current=%v, candidates=%v}", t.current, t.candidates)
 }
 
-func (t planTable) addCurrent(e *endpoint.Endpoint) {
+func (t *planTable) addCurrent(e *endpoint.Endpoint) {
 	key := t.newPlanKey(e)
 	t.rows[key].current = append(t.rows[key].current, e)
 	t.rows[key].records[e.RecordType].current = e
 }
 
-func (t planTable) addCandidate(e *endpoint.Endpoint) {
+func (t *planTable) addCandidate(e *endpoint.Endpoint) {
 	key := t.newPlanKey(e)
 	t.rows[key].candidates = append(t.rows[key].candidates, e)
 	t.rows[key].records[e.RecordType].candidates = append(t.rows[key].records[e.RecordType].candidates, e)
@@ -241,6 +241,10 @@ func (p *Plan) Calculate() *Plan {
 
 				if ownersMatch {
 					changes.Create = append(changes.Create, creates...)
+				} else if log.GetLevel() == log.DebugLevel {
+					for _, current := range row.current {
+						log.Debugf(`Skipping endpoint %v because owner id does not match for one or more items to create, found: "%s", required: "%s"`, current, current.Labels[endpoint.OwnerLabelKey], p.OwnerID)
+					}
 				}
 			}
 		}
@@ -253,14 +257,17 @@ func (p *Plan) Calculate() *Plan {
 	// filter out updates this external dns does not have ownership claim over
 	if p.OwnerID != "" {
 		changes.Delete = endpoint.FilterEndpointsByOwnerID(p.OwnerID, changes.Delete)
+		changes.Delete = endpoint.RemoveDuplicates(changes.Delete)
 		changes.UpdateOld = endpoint.FilterEndpointsByOwnerID(p.OwnerID, changes.UpdateOld)
 		changes.UpdateNew = endpoint.FilterEndpointsByOwnerID(p.OwnerID, changes.UpdateNew)
 	}
 
 	plan := &Plan{
-		Current:        p.Current,
-		Desired:        p.Desired,
-		Changes:        changes,
+		Current: p.Current,
+		Desired: p.Desired,
+		Changes: changes,
+		// The default for ExternalDNS is to always only consider A/AAAA and CNAMEs.
+		// Everything else is an add on or something to be considered.
 		ManagedRecords: []string{endpoint.RecordTypeA, endpoint.RecordTypeAAAA, endpoint.RecordTypeCNAME},
 	}
 
@@ -309,7 +316,7 @@ func (p *Plan) shouldUpdateProviderSpecific(desired, current *endpoint.Endpoint)
 }
 
 // filterRecordsForPlan removes records that are not relevant to the planner.
-// Currently this just removes TXT records to prevent them from being
+// Currently, this just removes TXT records to prevent them from being
 // deleted erroneously by the planner (only the TXT registry should do this.)
 //
 // Per RFC 1034, CNAME records conflict with all other records - it is the
@@ -333,38 +340,16 @@ func filterRecordsForPlan(records []*endpoint.Endpoint, domainFilter endpoint.Ma
 }
 
 // normalizeDNSName converts a DNS name to a canonical form, so that we can use string equality
-// it: removes space, converts to lower case, ensures there is a trailing dot
+// it: removes space, get ASCII version of dnsName complient with Section 5 of RFC 5891, ensures there is a trailing dot
 func normalizeDNSName(dnsName string) string {
-	s := strings.TrimSpace(strings.ToLower(dnsName))
+	s, err := idna.Lookup.ToASCII(strings.TrimSpace(dnsName))
+	if err != nil {
+		log.Warnf(`Got error while parsing DNSName %s: %v`, dnsName, err)
+	}
 	if !strings.HasSuffix(s, ".") {
 		s += "."
 	}
 	return s
-}
-
-// CompareBoolean is an implementation of PropertyComparator for comparing boolean-line values
-// For example external-dns.alpha.kubernetes.io/cloudflare-proxied: "true"
-// If value doesn't parse as boolean, the defaultValue is used
-func CompareBoolean(defaultValue bool, name, current, previous string) bool {
-	var err error
-
-	v1, v2 := defaultValue, defaultValue
-
-	if previous != "" {
-		v1, err = strconv.ParseBool(previous)
-		if err != nil {
-			v1 = defaultValue
-		}
-	}
-
-	if current != "" {
-		v2, err = strconv.ParseBool(current)
-		if err != nil {
-			v2 = defaultValue
-		}
-	}
-
-	return v1 == v2
 }
 
 func IsManagedRecord(record string, managedRecords, excludeRecords []string) bool {

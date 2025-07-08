@@ -18,11 +18,11 @@ package source
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	fakeDynamic "k8s.io/client-go/dynamic/fake"
 
-	"github.com/pkg/errors"
 	projectcontour "github.com/projectcontour/contour/apis/projectcontour/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -31,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+
 	"sigs.k8s.io/external-dns/endpoint"
 )
 
@@ -178,7 +179,7 @@ func TestNewContourHTTPProxySource(t *testing.T) {
 			annotationFilter: "contour.heptio.com/ingress.class=contour",
 		},
 	} {
-		ti := ti
+
 		t.Run(ti.title, func(t *testing.T) {
 			t.Parallel()
 
@@ -270,14 +271,6 @@ func testEndpointsFromHTTPProxy(t *testing.T) {
 			expected:  []*endpoint.Endpoint{},
 		},
 		{
-			title: "one rule.host invalid httpproxy",
-			httpProxy: fakeHTTPProxy{
-				host:    "foo.bar",
-				invalid: true,
-			},
-			expected: []*endpoint.Endpoint{},
-		},
-		{
 			title:     "no targets",
 			httpProxy: fakeHTTPProxy{},
 			expected:  []*endpoint.Endpoint{},
@@ -290,7 +283,7 @@ func testEndpointsFromHTTPProxy(t *testing.T) {
 			expected: []*endpoint.Endpoint{},
 		},
 	} {
-		ti := ti
+
 		t.Run(ti.title, func(t *testing.T) {
 			t.Parallel()
 
@@ -1042,7 +1035,7 @@ func testHTTPProxyEndpoints(t *testing.T) {
 			ignoreHostnameAnnotation: true,
 		},
 	} {
-		ti := ti
+
 		t.Run(ti.title, func(t *testing.T) {
 			t.Parallel()
 
@@ -1114,19 +1107,11 @@ type fakeHTTPProxy struct {
 	annotations map[string]string
 
 	host         string
-	invalid      bool
 	delegate     bool
 	loadBalancer fakeLoadBalancerService
 }
 
 func (ir fakeHTTPProxy) HTTPProxy() *projectcontour.HTTPProxy {
-	var status string
-	if ir.invalid {
-		status = "invalid"
-	} else {
-		status = "valid"
-	}
-
 	var spec projectcontour.HTTPProxySpec
 	if ir.delegate {
 		spec = projectcontour.HTTPProxySpec{}
@@ -1161,8 +1146,7 @@ func (ir fakeHTTPProxy) HTTPProxy() *projectcontour.HTTPProxy {
 		},
 		Spec: spec,
 		Status: projectcontour.HTTPProxyStatus{
-			CurrentStatus: status,
-			LoadBalancer:  lb,
+			LoadBalancer: lb,
 		},
 	}
 

@@ -6,7 +6,7 @@ The following table documents which sources support which annotations:
 
 | Source       | controller | hostname | internal-hostname | target  | ttl     | (provider-specific) |
 |--------------|------------|----------|-------------------|---------|---------|---------------------|
-| Ambassador   |            |          |                   | Yes     | Yes     |                     |
+| Ambassador   |            |          |                   | Yes     | Yes     | Yes                 |
 | Connector    |            |          |                   |         |         |                     |
 | Contour      | Yes        | Yes[^1]  |                   | Yes     | Yes     | Yes                 |
 | CloudFoundry |            |          |                   |         |         |                     |
@@ -16,13 +16,13 @@ The following table documents which sources support which annotations:
 | Gloo         |            |          |                   | Yes     | Yes[^5] | Yes[^5]             |
 | Ingress      | Yes        | Yes[^1]  |                   | Yes     | Yes     | Yes                 |
 | Istio        | Yes        | Yes[^1]  |                   | Yes     | Yes     | Yes                 |
-| Kong         |            | Yes      |                   | Yes     | Yes     | Yes                 |
+| Kong         |            | Yes[^1]  |                   | Yes     | Yes     | Yes                 |
 | Node         | Yes        |          |                   | Yes     | Yes     |                     |
 | OpenShift    | Yes        | Yes[^1]  |                   | Yes     | Yes     | Yes                 |
 | Pod          |            | Yes      | Yes               | Yes     |         |                     |
 | Service      | Yes        | Yes[^1]  | Yes[^1][^2]       | Yes[^3] | Yes     | Yes                 |
 | Skipper      | Yes        | Yes[^1]  |                   | Yes     | Yes     | Yes                 |
-| Traefik      |            | Yes      |                   | Yes     | Yes     | Yes                 |
+| Traefik      |            | Yes[^1]  |                   | Yes     | Yes     | Yes                 |
 
 [^1]: Unless the `--ignore-hostname-annotation` flag is specified.
 [^2]: Only behaves differently than `hostname` for `Service`s of type `ClusterIP` or `LoadBalancer`.
@@ -61,6 +61,11 @@ Otherwise, use the `IP` of each of the `Service`'s `Endpoints`'s `Addresses`.
 
 Specifies the domain for the resource's DNS records.
 
+Multiple hostnames can be specified through a comma-separated list, e.g.
+`svc.mydomain1.com,svc.mydomain2.com`.
+
+For `Pods`, uses the `Pod`'s `Status.PodIP`, unless they are `hostNetwork: true` in which case the NodeExternalIP is used for IPv4 and NodeInternalIP for IPv6.
+
 ## external-dns.alpha.kubernetes.io/ingress-hostname-source
 
 Specifies where to get the domain for an `Ingress` resource.
@@ -77,7 +82,7 @@ Specifies the domain for the resource's DNS records that are for use from intern
 
 For `Services` of type `LoadBalancer`, uses the `Service`'s `ClusterIP`.
 
-For `Pods`, uses the `Pod`'s `Status.PodIP`.
+For `Pods`, uses the `Pod`'s `Status.PodIP`, unless they are `hostNetwork: true` in which case the NodeExternalIP is used for IPv4 and NodeInternalIP for IPv6.
 
 ## external-dns.alpha.kubernetes.io/target
 
@@ -102,7 +107,6 @@ Some providers define their own annotations. Cloud-specific annotations have key
 |------------|------------------------------------------------|
 | AWS        | `external-dns.alpha.kubernetes.io/aws-`        |
 | CloudFlare | `external-dns.alpha.kubernetes.io/cloudflare-` |
-| IBM Cloud  | `external-dns.alpha.kubernetes.io/ibmcloud-`   |
 | Scaleway   | `external-dns.alpha.kubernetes.io/scw-`        |
 
 Additional annotations that are currently implemented only by AWS are:
