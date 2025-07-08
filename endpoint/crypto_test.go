@@ -17,7 +17,11 @@ limitations under the License.
 package endpoint
 
 import (
+	"encoding/base64"
+	"io"
 	"testing"
+
+	"crypto/rand"
 
 	"github.com/stretchr/testify/require"
 )
@@ -41,7 +45,7 @@ func TestEncrypt(t *testing.T) {
 		t.Error("Data decryption failed, empty string should be as result")
 	}
 
-	// Verify that decrypt returns an error and empty data if unencrypted input is is supplied
+	// Verify that decrypt returns an error and empty data if unencrypted input is supplied
 	decryptedtext, _, err = DecryptText(plaintext, aesKey)
 	require.Error(t, err)
 	if decryptedtext != "" {
@@ -55,4 +59,34 @@ func TestEncrypt(t *testing.T) {
 	if decryptedtext != plaintext {
 		t.Error("Decryption of text didn't result in expected plaintext result.")
 	}
+}
+
+func TestGenerateNonceSuccess(t *testing.T) {
+	nonce, err := GenerateNonce()
+	require.NoError(t, err)
+	require.NotEmpty(t, nonce)
+
+	// Test nonce length
+	decodedNonce, err := base64.StdEncoding.DecodeString(string(nonce))
+	require.NoError(t, err)
+	require.Len(t, decodedNonce, standardGcmNonceSize)
+}
+
+func TestGenerateNonceError(t *testing.T) {
+	// Save the original rand.Reader
+	originalRandReader := rand.Reader
+	defer func() { rand.Reader = originalRandReader }()
+
+	// Replace rand.Reader with a faulty reader
+	rand.Reader = &faultyReader{}
+
+	nonce, err := GenerateNonce()
+	require.Error(t, err)
+	require.Nil(t, nonce)
+}
+
+type faultyReader struct{}
+
+func (f *faultyReader) Read(p []byte) (n int, err error) {
+	return 0, io.ErrUnexpectedEOF
 }

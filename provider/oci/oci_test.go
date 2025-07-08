@@ -18,13 +18,15 @@ package oci
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/oracle/oci-go-sdk/v65/common"
 	"github.com/oracle/oci-go-sdk/v65/dns"
-	"github.com/pkg/errors"
 	"github.com/stretchr/testify/require"
 
 	"sigs.k8s.io/external-dns/endpoint"
@@ -34,25 +36,49 @@ import (
 
 type mockOCIDNSClient struct{}
 
-func (c *mockOCIDNSClient) ListZones(ctx context.Context, request dns.ListZonesRequest) (response dns.ListZonesResponse, err error) {
+var (
+	zoneIdQux                 = "ocid1.dns-zone.oc1..123456ef0bfbb5c251b9713fd7bf8959"
+	zoneNameQux               = "qux.com"
+	testPrivateZoneSummaryQux = dns.ZoneSummary{
+		Id:   &zoneIdQux,
+		Name: &zoneNameQux,
+	}
+	zoneIdBaz                 = "ocid1.dns-zone.oc1..789012ef0bfbb5c251b9713fd7bf8959"
+	zoneNameBaz               = "baz.com"
+	testPrivateZoneSummaryBaz = dns.ZoneSummary{
+		Id:   &zoneIdBaz,
+		Name: &zoneNameBaz,
+	}
+	testGlobalZoneSummaryFoo = dns.ZoneSummary{
+		Id:   common.String("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
+		Name: common.String("foo.com"),
+	}
+	testGlobalZoneSummaryBar = dns.ZoneSummary{
+		Id:   common.String("ocid1.dns-zone.oc1..502aeddba262b92fd13ed7874f6f1404"),
+		Name: common.String("bar.com"),
+	}
+)
+
+func buildZoneResponseItems(scope dns.ListZonesScopeEnum, privateZones, globalZones []dns.ZoneSummary) []dns.ZoneSummary {
+	switch string(scope) {
+	case "PRIVATE":
+		return privateZones
+	case "GLOBAL":
+		return globalZones
+	default:
+		return append(privateZones, globalZones...)
+	}
+}
+
+func (c *mockOCIDNSClient) ListZones(_ context.Context, request dns.ListZonesRequest) (response dns.ListZonesResponse, err error) {
 	if request.Page == nil || *request.Page == "0" {
 		return dns.ListZonesResponse{
-			Items: []dns.ZoneSummary{
-				{
-					Id:   common.String("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
-					Name: common.String("foo.com"),
-				},
-			},
+			Items:       buildZoneResponseItems(request.Scope, []dns.ZoneSummary{testPrivateZoneSummaryBaz}, []dns.ZoneSummary{testGlobalZoneSummaryFoo}),
 			OpcNextPage: common.String("1"),
 		}, nil
 	}
 	return dns.ListZonesResponse{
-		Items: []dns.ZoneSummary{
-			{
-				Id:   common.String("ocid1.dns-zone.oc1..502aeddba262b92fd13ed7874f6f1404"),
-				Name: common.String("bar.com"),
-			},
-		},
+		Items: buildZoneResponseItems(request.Scope, []dns.ZoneSummary{testPrivateZoneSummaryQux}, []dns.ZoneSummary{testGlobalZoneSummaryBar}),
 	}, nil
 }
 
@@ -68,12 +94,12 @@ func (c *mockOCIDNSClient) GetZoneRecords(ctx context.Context, request dns.GetZo
 				Domain: common.String("foo.foo.com"),
 				Rdata:  common.String("127.0.0.1"),
 				Rtype:  common.String(endpoint.RecordTypeA),
-				Ttl:    common.Int(ociRecordTTL),
+				Ttl:    common.Int(defaultTTL),
 			}, {
 				Domain: common.String("foo.foo.com"),
 				Rdata:  common.String("heritage=external-dns,external-dns/owner=default,external-dns/resource=service/default/my-svc"),
 				Rtype:  common.String(endpoint.RecordTypeTXT),
-				Ttl:    common.Int(ociRecordTTL),
+				Ttl:    common.Int(defaultTTL),
 			}}
 			response.OpcNextPage = common.String("1")
 		} else {
@@ -81,7 +107,7 @@ func (c *mockOCIDNSClient) GetZoneRecords(ctx context.Context, request dns.GetZo
 				Domain: common.String("bar.foo.com"),
 				Rdata:  common.String("bar.com."),
 				Rtype:  common.String(endpoint.RecordTypeCNAME),
-				Ttl:    common.Int(ociRecordTTL),
+				Ttl:    common.Int(defaultTTL),
 			}}
 		}
 	case "ocid1.dns-zone.oc1..502aeddba262b92fd13ed7874f6f1404":
@@ -90,7 +116,7 @@ func (c *mockOCIDNSClient) GetZoneRecords(ctx context.Context, request dns.GetZo
 				Domain: common.String("foo.bar.com"),
 				Rdata:  common.String("127.0.0.1"),
 				Rtype:  common.String(endpoint.RecordTypeA),
-				Ttl:    common.Int(ociRecordTTL),
+				Ttl:    common.Int(defaultTTL),
 			}}
 		}
 	}
@@ -103,7 +129,7 @@ func (c *mockOCIDNSClient) PatchZoneRecords(ctx context.Context, request dns.Pat
 }
 
 // newOCIProvider creates an OCI provider with API calls mocked out.
-func newOCIProvider(client ociDNSClient, domainFilter endpoint.DomainFilter, zoneIDFilter provider.ZoneIDFilter, dryRun bool) *OCIProvider {
+func newOCIProvider(client ociDNSClient, domainFilter *endpoint.DomainFilter, zoneIDFilter provider.ZoneIDFilter, zoneScope string, dryRun bool) *OCIProvider {
 	return &OCIProvider{
 		client: client,
 		cfg: OCIConfig{
@@ -111,7 +137,11 @@ func newOCIProvider(client ociDNSClient, domainFilter endpoint.DomainFilter, zon
 		},
 		domainFilter: domainFilter,
 		zoneIDFilter: zoneIDFilter,
-		dryRun:       dryRun,
+		zoneScope:    zoneScope,
+		zoneCache: &zoneCache{
+			duration: 0 * time.Second,
+		},
+		dryRun: dryRun,
 	}
 }
 
@@ -168,17 +198,6 @@ hKRtDhmSdWBo3tJK12RrAe4t7CUe8gMgTvU7ExlcA3xQkseFPx9K
 				},
 			},
 		},
-		"instance-principal": {
-			// testing the InstancePrincipalConfigurationProvider is tricky outside of an OCI context, because it tries
-			// to request a token from the internal OCI systems; this test-case just confirms that the expected error is
-			// observed, confirming that the instance-principal provider was instantiated.
-			config: OCIConfig{
-				Auth: OCIAuthConfig{
-					UseInstancePrincipal: true,
-				},
-			},
-			err: errors.New("error creating OCI instance principal config provider: failed to create a new key provider for instance principal"),
-		},
 		"invalid": {
 			config: OCIConfig{
 				Auth: OCIAuthConfig{
@@ -192,6 +211,16 @@ hKRtDhmSdWBo3tJK12RrAe4t7CUe8gMgTvU7ExlcA3xQkseFPx9K
 			},
 			err: errors.New("initializing OCI DNS API client: can not create client, bad configuration: PEM data was not found in buffer"),
 		},
+		"invalid-auth-methods": {
+			config: OCIConfig{
+				Auth: OCIAuthConfig{
+					Region:               "us-ashburn-1",
+					UseInstancePrincipal: true,
+					UseWorkloadIdentity:  true,
+				},
+			},
+			err: errors.New("only one of 'useInstancePrincipal' and 'useWorkloadIdentity' may be enabled for Oracle authentication"),
+		},
 	}
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
@@ -199,6 +228,7 @@ hKRtDhmSdWBo3tJK12RrAe4t7CUe8gMgTvU7ExlcA3xQkseFPx9K
 				tc.config,
 				endpoint.NewDomainFilter([]string{"com"}),
 				provider.NewZoneIDFilter([]string{""}),
+				string(dns.GetZoneScopeGlobal),
 				false,
 			)
 			if err == nil {
@@ -212,43 +242,67 @@ hKRtDhmSdWBo3tJK12RrAe4t7CUe8gMgTvU7ExlcA3xQkseFPx9K
 }
 
 func TestOCIZones(t *testing.T) {
+	fooZoneId := "ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"
+	barZoneId := "ocid1.dns-zone.oc1..502aeddba262b92fd13ed7874f6f1404"
 	testCases := []struct {
 		name         string
-		domainFilter endpoint.DomainFilter
+		domainFilter *endpoint.DomainFilter
 		zoneIDFilter provider.ZoneIDFilter
+		zoneScope    string
 		expected     map[string]dns.ZoneSummary
 	}{
+		{
+			name:         "AllZones",
+			domainFilter: endpoint.NewDomainFilter([]string{"com"}),
+			zoneIDFilter: provider.NewZoneIDFilter([]string{""}),
+			zoneScope:    "",
+			expected: map[string]dns.ZoneSummary{
+				fooZoneId: testGlobalZoneSummaryFoo,
+				barZoneId: testGlobalZoneSummaryBar,
+				zoneIdBaz: testPrivateZoneSummaryBaz,
+				zoneIdQux: testPrivateZoneSummaryQux,
+			},
+		},
+		{
+			name:         "Privatezones",
+			domainFilter: endpoint.NewDomainFilter([]string{"com"}),
+			zoneIDFilter: provider.NewZoneIDFilter([]string{""}),
+			zoneScope:    "PRIVATE",
+			expected: map[string]dns.ZoneSummary{
+				zoneIdBaz: testPrivateZoneSummaryBaz,
+				zoneIdQux: testPrivateZoneSummaryQux,
+			},
+		},
 		{
 			name:         "DomainFilter_com",
 			domainFilter: endpoint.NewDomainFilter([]string{"com"}),
 			zoneIDFilter: provider.NewZoneIDFilter([]string{""}),
+			zoneScope:    "GLOBAL",
 			expected: map[string]dns.ZoneSummary{
-				"foo.com": {
-					Id:   common.String("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
-					Name: common.String("foo.com"),
-				},
-				"bar.com": {
-					Id:   common.String("ocid1.dns-zone.oc1..502aeddba262b92fd13ed7874f6f1404"),
-					Name: common.String("bar.com"),
-				},
+				fooZoneId: testGlobalZoneSummaryFoo,
+				barZoneId: testGlobalZoneSummaryBar,
 			},
-		}, {
+		},
+		{
 			name:         "DomainFilter_foo.com",
 			domainFilter: endpoint.NewDomainFilter([]string{"foo.com"}),
 			zoneIDFilter: provider.NewZoneIDFilter([]string{""}),
+			zoneScope:    "GLOBAL",
 			expected: map[string]dns.ZoneSummary{
-				"foo.com": {
-					Id:   common.String("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
+				fooZoneId: {
+					Id:   common.String(fooZoneId),
 					Name: common.String("foo.com"),
 				},
 			},
-		}, {
+		},
+		{
 			name:         "ZoneIDFilter_ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959",
 			domainFilter: endpoint.NewDomainFilter([]string{""}),
 			zoneIDFilter: provider.NewZoneIDFilter([]string{"ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"}),
+			zoneScope:    "GLOBAL",
 			expected: map[string]dns.ZoneSummary{
-				"foo.com": {
-					Id:   common.String("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
+				fooZoneId: {
+					Id:   common.String(fooZoneId),
 					Name: common.String("foo.com"),
 				},
 			},
@@ -256,7 +310,7 @@ func TestOCIZones(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			provider := newOCIProvider(&mockOCIDNSClient{}, tc.domainFilter, tc.zoneIDFilter, false)
+			provider := newOCIProvider(&mockOCIDNSClient{}, tc.domainFilter, tc.zoneIDFilter, tc.zoneScope, false)
 			zones, err := provider.zones(context.Background())
 			require.NoError(t, err)
 			validateOCIZones(t, zones, tc.expected)
@@ -267,7 +321,7 @@ func TestOCIZones(t *testing.T) {
 func TestOCIRecords(t *testing.T) {
 	testCases := []struct {
 		name         string
-		domainFilter endpoint.DomainFilter
+		domainFilter *endpoint.DomainFilter
 		zoneIDFilter provider.ZoneIDFilter
 		expected     []*endpoint.Endpoint
 	}{
@@ -276,32 +330,32 @@ func TestOCIRecords(t *testing.T) {
 			domainFilter: endpoint.NewDomainFilter([]string{""}),
 			zoneIDFilter: provider.NewZoneIDFilter([]string{""}),
 			expected: []*endpoint.Endpoint{
-				endpoint.NewEndpointWithTTL("foo.foo.com", endpoint.RecordTypeA, endpoint.TTL(ociRecordTTL), "127.0.0.1"),
-				endpoint.NewEndpointWithTTL("foo.foo.com", endpoint.RecordTypeTXT, endpoint.TTL(ociRecordTTL), "heritage=external-dns,external-dns/owner=default,external-dns/resource=service/default/my-svc"),
-				endpoint.NewEndpointWithTTL("bar.foo.com", endpoint.RecordTypeCNAME, endpoint.TTL(ociRecordTTL), "bar.com."),
-				endpoint.NewEndpointWithTTL("foo.bar.com", endpoint.RecordTypeA, endpoint.TTL(ociRecordTTL), "127.0.0.1"),
+				endpoint.NewEndpointWithTTL("foo.foo.com", endpoint.RecordTypeA, endpoint.TTL(defaultTTL), "127.0.0.1"),
+				endpoint.NewEndpointWithTTL("foo.foo.com", endpoint.RecordTypeTXT, endpoint.TTL(defaultTTL), "heritage=external-dns,external-dns/owner=default,external-dns/resource=service/default/my-svc"),
+				endpoint.NewEndpointWithTTL("bar.foo.com", endpoint.RecordTypeCNAME, endpoint.TTL(defaultTTL), "bar.com."),
+				endpoint.NewEndpointWithTTL("foo.bar.com", endpoint.RecordTypeA, endpoint.TTL(defaultTTL), "127.0.0.1"),
 			},
 		}, {
 			name:         "DomainFilter_foo.com",
 			domainFilter: endpoint.NewDomainFilter([]string{"foo.com"}),
 			zoneIDFilter: provider.NewZoneIDFilter([]string{""}),
 			expected: []*endpoint.Endpoint{
-				endpoint.NewEndpointWithTTL("foo.foo.com", endpoint.RecordTypeA, endpoint.TTL(ociRecordTTL), "127.0.0.1"),
-				endpoint.NewEndpointWithTTL("foo.foo.com", endpoint.RecordTypeTXT, endpoint.TTL(ociRecordTTL), "heritage=external-dns,external-dns/owner=default,external-dns/resource=service/default/my-svc"),
-				endpoint.NewEndpointWithTTL("bar.foo.com", endpoint.RecordTypeCNAME, endpoint.TTL(ociRecordTTL), "bar.com."),
+				endpoint.NewEndpointWithTTL("foo.foo.com", endpoint.RecordTypeA, endpoint.TTL(defaultTTL), "127.0.0.1"),
+				endpoint.NewEndpointWithTTL("foo.foo.com", endpoint.RecordTypeTXT, endpoint.TTL(defaultTTL), "heritage=external-dns,external-dns/owner=default,external-dns/resource=service/default/my-svc"),
+				endpoint.NewEndpointWithTTL("bar.foo.com", endpoint.RecordTypeCNAME, endpoint.TTL(defaultTTL), "bar.com."),
 			},
 		}, {
 			name:         "ZoneIDFilter_ocid1.dns-zone.oc1..502aeddba262b92fd13ed7874f6f1404",
 			domainFilter: endpoint.NewDomainFilter([]string{""}),
 			zoneIDFilter: provider.NewZoneIDFilter([]string{"ocid1.dns-zone.oc1..502aeddba262b92fd13ed7874f6f1404"}),
 			expected: []*endpoint.Endpoint{
-				endpoint.NewEndpointWithTTL("foo.bar.com", endpoint.RecordTypeA, endpoint.TTL(ociRecordTTL), "127.0.0.1"),
+				endpoint.NewEndpointWithTTL("foo.bar.com", endpoint.RecordTypeA, endpoint.TTL(defaultTTL), "127.0.0.1"),
 			},
 		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			provider := newOCIProvider(&mockOCIDNSClient{}, tc.domainFilter, tc.zoneIDFilter, false)
+			provider := newOCIProvider(&mockOCIDNSClient{}, tc.domainFilter, tc.zoneIDFilter, "", false)
 			endpoints, err := provider.Records(context.Background())
 			require.NoError(t, err)
 			require.ElementsMatch(t, tc.expected, endpoints)
@@ -322,7 +376,7 @@ func TestNewRecordOperation(t *testing.T) {
 			ep: endpoint.NewEndpointWithTTL(
 				"foo.foo.com",
 				endpoint.RecordTypeA,
-				endpoint.TTL(ociRecordTTL),
+				endpoint.TTL(defaultTTL),
 				"127.0.0.1"),
 			expected: dns.RecordOperation{
 				Domain:    common.String("foo.foo.com"),
@@ -337,7 +391,7 @@ func TestNewRecordOperation(t *testing.T) {
 			ep: endpoint.NewEndpointWithTTL(
 				"foo.foo.com",
 				endpoint.RecordTypeTXT,
-				endpoint.TTL(ociRecordTTL),
+				endpoint.TTL(defaultTTL),
 				"heritage=external-dns,external-dns/owner=default,external-dns/resource=service/default/my-svc"),
 			expected: dns.RecordOperation{
 				Domain:    common.String("foo.foo.com"),
@@ -352,7 +406,7 @@ func TestNewRecordOperation(t *testing.T) {
 			ep: endpoint.NewEndpointWithTTL(
 				"foo.foo.com",
 				endpoint.RecordTypeCNAME,
-				endpoint.TTL(ociRecordTTL),
+				endpoint.TTL(defaultTTL),
 				"bar.com."),
 			expected: dns.RecordOperation{
 				Domain:    common.String("foo.foo.com"),
@@ -488,7 +542,7 @@ func newMutableMockOCIDNSClient(zones []dns.ZoneSummary, recordsByZone map[strin
 
 	for zoneID, records := range recordsByZone {
 		for _, record := range records {
-			c.records[zoneID][ociRecordKey(*record.Rtype, *record.Domain)] = record
+			c.records[zoneID][ociRecordKey(*record.Rtype, *record.Domain, *record.Rdata)] = record
 		}
 	}
 
@@ -524,8 +578,18 @@ func (c *mutableMockOCIDNSClient) GetZoneRecords(ctx context.Context, request dn
 	return
 }
 
-func ociRecordKey(rType, domain string) string {
-	return rType + "/" + domain
+func ociRecordKey(rType, domain string, ip string) string {
+	rdata := ""
+	if rType == "A" { // adds support for multi-targets with same rtype and domain
+		rdata = "_" + ip
+	}
+	return rType + "_" + domain + rdata
+}
+
+func sortEndpointTargets(endpoints []*endpoint.Endpoint) {
+	for _, ep := range endpoints {
+		sort.Strings([]string(ep.Targets))
+	}
 }
 
 func (c *mutableMockOCIDNSClient) PatchZoneRecords(ctx context.Context, request dns.PatchZoneRecordsRequest) (response dns.PatchZoneRecordsResponse, err error) {
@@ -546,7 +610,7 @@ func (c *mutableMockOCIDNSClient) PatchZoneRecords(ctx context.Context, request 
 	})
 
 	for _, op := range request.Items {
-		k := ociRecordKey(*op.Rtype, *op.Domain)
+		k := ociRecordKey(*op.Rtype, *op.Domain, *op.Rdata)
 		switch op.Operation {
 		case dns.RecordOperationOperationAdd:
 			records[k] = dns.Record{
@@ -558,7 +622,7 @@ func (c *mutableMockOCIDNSClient) PatchZoneRecords(ctx context.Context, request 
 		case dns.RecordOperationOperationRemove:
 			delete(records, k)
 		default:
-			err = errors.Errorf("unsupported operation %q", op.Operation)
+			err = fmt.Errorf("unsupported operation %q", op.Operation)
 			return
 		}
 	}
@@ -577,12 +641,12 @@ func TestMutableMockOCIDNSClient(t *testing.T) {
 			Domain: common.String("foo.foo.com"),
 			Rdata:  common.String("127.0.0.1"),
 			Rtype:  common.String(endpoint.RecordTypeA),
-			Ttl:    common.Int(ociRecordTTL),
+			Ttl:    common.Int(defaultTTL),
 		}, {
 			Domain: common.String("foo.foo.com"),
 			Rdata:  common.String("heritage=external-dns,external-dns/owner=default,external-dns/resource=service/default/my-svc"),
 			Rtype:  common.String(endpoint.RecordTypeTXT),
-			Ttl:    common.Int(ociRecordTTL),
+			Ttl:    common.Int(defaultTTL),
 		}},
 	}
 	client := newMutableMockOCIDNSClient(zones, records)
@@ -649,6 +713,7 @@ func TestMutableMockOCIDNSClient(t *testing.T) {
 }
 
 func TestOCIApplyChanges(t *testing.T) {
+
 	testCases := []struct {
 		name              string
 		zones             []dns.ZoneSummary
@@ -668,14 +733,14 @@ func TestOCIApplyChanges(t *testing.T) {
 				Create: []*endpoint.Endpoint{endpoint.NewEndpointWithTTL(
 					"foo.foo.com",
 					endpoint.RecordTypeA,
-					endpoint.TTL(ociRecordTTL),
+					endpoint.TTL(defaultTTL),
 					"127.0.0.1",
 				)},
 			},
 			expectedEndpoints: []*endpoint.Endpoint{endpoint.NewEndpointWithTTL(
 				"foo.foo.com",
 				endpoint.RecordTypeA,
-				endpoint.TTL(ociRecordTTL),
+				endpoint.TTL(defaultTTL),
 				"127.0.0.1",
 			)},
 		}, {
@@ -689,26 +754,26 @@ func TestOCIApplyChanges(t *testing.T) {
 					Domain: common.String("foo.foo.com"),
 					Rdata:  common.String("127.0.0.1"),
 					Rtype:  common.String(endpoint.RecordTypeA),
-					Ttl:    common.Int(ociRecordTTL),
+					Ttl:    common.Int(defaultTTL),
 				}, {
 					Domain: common.String("foo.foo.com"),
 					Rdata:  common.String("heritage=external-dns,external-dns/owner=default,external-dns/resource=service/default/my-svc"),
 					Rtype:  common.String(endpoint.RecordTypeTXT),
-					Ttl:    common.Int(ociRecordTTL),
+					Ttl:    common.Int(defaultTTL),
 				}},
 			},
 			changes: &plan.Changes{
 				Delete: []*endpoint.Endpoint{endpoint.NewEndpointWithTTL(
 					"foo.foo.com",
 					endpoint.RecordTypeTXT,
-					endpoint.TTL(ociRecordTTL),
+					endpoint.TTL(defaultTTL),
 					"127.0.0.1",
 				)},
 			},
 			expectedEndpoints: []*endpoint.Endpoint{endpoint.NewEndpointWithTTL(
 				"foo.foo.com",
 				endpoint.RecordTypeA,
-				endpoint.TTL(ociRecordTTL),
+				endpoint.TTL(defaultTTL),
 				"127.0.0.1",
 			)},
 		}, {
@@ -722,27 +787,27 @@ func TestOCIApplyChanges(t *testing.T) {
 					Domain: common.String("foo.foo.com"),
 					Rdata:  common.String("127.0.0.1"),
 					Rtype:  common.String(endpoint.RecordTypeA),
-					Ttl:    common.Int(ociRecordTTL),
+					Ttl:    common.Int(defaultTTL),
 				}},
 			},
 			changes: &plan.Changes{
 				UpdateOld: []*endpoint.Endpoint{endpoint.NewEndpointWithTTL(
 					"foo.foo.com",
 					endpoint.RecordTypeA,
-					endpoint.TTL(ociRecordTTL),
+					endpoint.TTL(defaultTTL),
 					"127.0.0.1",
 				)},
 				UpdateNew: []*endpoint.Endpoint{endpoint.NewEndpointWithTTL(
 					"foo.foo.com",
 					endpoint.RecordTypeA,
-					endpoint.TTL(ociRecordTTL),
+					endpoint.TTL(defaultTTL),
 					"10.0.0.1",
 				)},
 			},
 			expectedEndpoints: []*endpoint.Endpoint{endpoint.NewEndpointWithTTL(
 				"foo.foo.com",
 				endpoint.RecordTypeA,
-				endpoint.TTL(ociRecordTTL),
+				endpoint.TTL(defaultTTL),
 				"10.0.0.1",
 			)},
 		}, {
@@ -756,14 +821,14 @@ func TestOCIApplyChanges(t *testing.T) {
 					Domain: common.String("foo.foo.com"),
 					Rdata:  common.String("127.0.0.1"),
 					Rtype:  common.String(endpoint.RecordTypeA),
-					Ttl:    common.Int(ociRecordTTL),
+					Ttl:    common.Int(defaultTTL),
 				}},
 			},
 			changes: &plan.Changes{
 				Delete: []*endpoint.Endpoint{endpoint.NewEndpointWithTTL(
 					"foo.foo.com",
 					endpoint.RecordTypeA,
-					endpoint.TTL(ociRecordTTL),
+					endpoint.TTL(defaultTTL),
 					"127.0.0.1",
 				)},
 			},
@@ -771,7 +836,7 @@ func TestOCIApplyChanges(t *testing.T) {
 			expectedEndpoints: []*endpoint.Endpoint{endpoint.NewEndpointWithTTL(
 				"foo.foo.com",
 				endpoint.RecordTypeA,
-				endpoint.TTL(ociRecordTTL),
+				endpoint.TTL(defaultTTL),
 				"127.0.0.1",
 			)},
 		}, {
@@ -785,37 +850,42 @@ func TestOCIApplyChanges(t *testing.T) {
 					Domain: common.String("foo.foo.com"),
 					Rdata:  common.String("127.0.0.1"),
 					Rtype:  common.String(endpoint.RecordTypeA),
-					Ttl:    common.Int(ociRecordTTL),
+					Ttl:    common.Int(defaultTTL),
 				}, {
-					Domain: common.String("bar.foo.com"),
+					Domain: common.String("car.foo.com"),
 					Rdata:  common.String("bar.com."),
 					Rtype:  common.String(endpoint.RecordTypeCNAME),
-					Ttl:    common.Int(ociRecordTTL),
+					Ttl:    common.Int(defaultTTL),
+				}, {
+					Domain: common.String("bar.foo.com"),
+					Rdata:  common.String("baz.com."),
+					Rtype:  common.String(endpoint.RecordTypeCNAME),
+					Ttl:    common.Int(defaultTTL),
 				}},
 			},
 			changes: &plan.Changes{
 				Delete: []*endpoint.Endpoint{endpoint.NewEndpointWithTTL(
 					"foo.foo.com",
 					endpoint.RecordTypeA,
-					endpoint.TTL(ociRecordTTL),
-					"baz.com.",
+					endpoint.TTL(defaultTTL),
+					"127.0.0.1",
 				)},
 				UpdateOld: []*endpoint.Endpoint{endpoint.NewEndpointWithTTL(
-					"bar.foo.com",
+					"car.foo.com",
 					endpoint.RecordTypeCNAME,
-					endpoint.TTL(ociRecordTTL),
+					endpoint.TTL(defaultTTL),
 					"baz.com.",
 				)},
 				UpdateNew: []*endpoint.Endpoint{endpoint.NewEndpointWithTTL(
 					"bar.foo.com",
 					endpoint.RecordTypeCNAME,
-					endpoint.TTL(ociRecordTTL),
+					endpoint.TTL(defaultTTL),
 					"foo.bar.com.",
 				)},
 				Create: []*endpoint.Endpoint{endpoint.NewEndpointWithTTL(
 					"baz.foo.com",
 					endpoint.RecordTypeA,
-					endpoint.TTL(ociRecordTTL),
+					endpoint.TTL(defaultTTL),
 					"127.0.0.1",
 				)},
 			},
@@ -823,15 +893,138 @@ func TestOCIApplyChanges(t *testing.T) {
 				endpoint.NewEndpointWithTTL(
 					"bar.foo.com",
 					endpoint.RecordTypeCNAME,
-					endpoint.TTL(ociRecordTTL),
+					endpoint.TTL(defaultTTL),
 					"foo.bar.com.",
 				),
 				endpoint.NewEndpointWithTTL(
 					"baz.foo.com",
 					endpoint.RecordTypeA,
-					endpoint.TTL(ociRecordTTL),
+					endpoint.TTL(defaultTTL),
 					"127.0.0.1"),
 			},
+		},
+		{
+			name: "combine_multi_target",
+			zones: []dns.ZoneSummary{{
+				Id:   common.String("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
+				Name: common.String("foo.com"),
+			}},
+
+			changes: &plan.Changes{
+				Create: []*endpoint.Endpoint{endpoint.NewEndpointWithTTL(
+					"foo.foo.com",
+					endpoint.RecordTypeA,
+					endpoint.TTL(defaultTTL),
+					"192.168.1.2",
+				), endpoint.NewEndpointWithTTL(
+					"foo.foo.com",
+					endpoint.RecordTypeA,
+					endpoint.TTL(defaultTTL),
+					"192.168.2.5",
+				)},
+			},
+			expectedEndpoints: []*endpoint.Endpoint{endpoint.NewEndpointWithTTL(
+				"foo.foo.com",
+				endpoint.RecordTypeA,
+				endpoint.TTL(defaultTTL), "192.168.1.2", "192.168.2.5",
+			)},
+		},
+		{
+			name: "remove_from_multi_target",
+			zones: []dns.ZoneSummary{{
+				Id:   common.String("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
+				Name: common.String("foo.com"),
+			}},
+			records: map[string][]dns.Record{
+				"ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959": {{
+					Domain: common.String("foo.foo.com"),
+					Rdata:  common.String("192.168.1.2"),
+					Rtype:  common.String(endpoint.RecordTypeA),
+					Ttl:    common.Int(defaultTTL),
+				}, {
+					Domain: common.String("foo.foo.com"),
+					Rdata:  common.String("192.168.2.5"),
+					Rtype:  common.String(endpoint.RecordTypeA),
+					Ttl:    common.Int(defaultTTL),
+				}},
+			},
+			changes: &plan.Changes{
+				Delete: []*endpoint.Endpoint{endpoint.NewEndpointWithTTL(
+					"foo.foo.com",
+					endpoint.RecordTypeA,
+					endpoint.TTL(defaultTTL),
+					"192.168.1.2",
+				)},
+			},
+			expectedEndpoints: []*endpoint.Endpoint{endpoint.NewEndpointWithTTL(
+				"foo.foo.com",
+				endpoint.RecordTypeA,
+				endpoint.TTL(defaultTTL), "192.168.2.5",
+			)},
+		},
+		{
+			name: "update_multi_target",
+			zones: []dns.ZoneSummary{{
+				Id:   common.String("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
+				Name: common.String("foo.com"),
+			}},
+			records: map[string][]dns.Record{
+				"ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959": {{
+					Domain: common.String("first.foo.com"),
+					Rdata:  common.String("10.77.4.5"),
+					Rtype:  common.String(endpoint.RecordTypeA),
+					Ttl:    common.Int(defaultTTL),
+				}},
+			},
+			changes: &plan.Changes{
+				UpdateOld: []*endpoint.Endpoint{endpoint.NewEndpointWithTTL(
+					"first.foo.com",
+					endpoint.RecordTypeA,
+					endpoint.TTL(defaultTTL),
+					"10.77.4.5",
+				)},
+				UpdateNew: []*endpoint.Endpoint{endpoint.NewEndpointWithTTL(
+					"first.foo.com",
+					endpoint.RecordTypeA,
+					endpoint.TTL(defaultTTL),
+					"10.77.6.10",
+				)},
+			},
+			expectedEndpoints: []*endpoint.Endpoint{endpoint.NewEndpointWithTTL(
+				"first.foo.com",
+				endpoint.RecordTypeA,
+				endpoint.TTL(defaultTTL),
+				"10.77.6.10",
+			)},
+		},
+		{
+			name: "increase_multi_target",
+			zones: []dns.ZoneSummary{{
+				Id:   common.String("ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959"),
+				Name: common.String("foo.com"),
+			}},
+			records: map[string][]dns.Record{
+				"ocid1.dns-zone.oc1..e1e042ef0bfbb5c251b9713fd7bf8959": {{
+					Domain: common.String("first.foo.com"),
+					Rdata:  common.String("10.77.4.5"),
+					Rtype:  common.String(endpoint.RecordTypeA),
+					Ttl:    common.Int(defaultTTL),
+				}},
+			},
+			changes: &plan.Changes{
+				Create: []*endpoint.Endpoint{endpoint.NewEndpointWithTTL(
+					"first.foo.com",
+					endpoint.RecordTypeA,
+					endpoint.TTL(defaultTTL),
+					"10.77.6.10",
+				)},
+			},
+			expectedEndpoints: []*endpoint.Endpoint{endpoint.NewEndpointWithTTL(
+				"first.foo.com",
+				endpoint.RecordTypeA,
+				endpoint.TTL(defaultTTL),
+				"10.77.4.5", "10.77.6.10",
+			)},
 		},
 	}
 
@@ -842,6 +1035,7 @@ func TestOCIApplyChanges(t *testing.T) {
 				client,
 				endpoint.NewDomainFilter([]string{""}),
 				provider.NewZoneIDFilter([]string{""}),
+				"",
 				tc.dryRun,
 			)
 
@@ -850,6 +1044,8 @@ func TestOCIApplyChanges(t *testing.T) {
 			require.Equal(t, tc.err, err)
 			endpoints, err := provider.Records(ctx)
 			require.NoError(t, err)
+			sortEndpointTargets(endpoints)
+			sortEndpointTargets(tc.expectedEndpoints)
 			require.ElementsMatch(t, tc.expectedEndpoints, endpoints)
 		})
 	}

@@ -41,15 +41,14 @@ type IngressSuite struct {
 }
 
 func (suite *IngressSuite) SetupTest() {
-	fakeClient := fake.NewSimpleClientset()
+	fakeClient := fake.NewClientset()
 
 	suite.fooWithTargets = (fakeIngress{
-		name:        "foo-with-targets",
-		namespace:   "default",
-		dnsnames:    []string{"foo"},
-		ips:         []string{"8.8.8.8"},
-		hostnames:   []string{"v1"},
-		annotations: map[string]string{ALBDualstackAnnotationKey: ALBDualstackAnnotationValue},
+		name:      "foo-with-targets",
+		namespace: "default",
+		dnsnames:  []string{"foo"},
+		ips:       []string{"8.8.8.8", "2606:4700:4700::1111"},
+		hostnames: []string{"v1"},
 	}).Ingress()
 	_, err := fakeClient.NetworkingV1().Ingresses(suite.fooWithTargets.Namespace).Create(context.Background(), suite.fooWithTargets, metav1.CreateOptions{})
 	suite.NoError(err, "should succeed")
@@ -77,13 +76,6 @@ func (suite *IngressSuite) TestResourceLabelIsSet() {
 	}
 }
 
-func (suite *IngressSuite) TestDualstackLabelIsSet() {
-	endpoints, _ := suite.sc.Endpoints(context.Background())
-	for _, ep := range endpoints {
-		suite.Equal("true", ep.Labels[endpoint.DualstackLabelKey], "should set dualstack label to true")
-	}
-}
-
 func TestIngress(t *testing.T) {
 	t.Parallel()
 
@@ -105,31 +97,6 @@ func TestNewIngressSource(t *testing.T) {
 		ingressClassNames        []string
 	}{
 		{
-			title:        "invalid template",
-			expectError:  true,
-			fqdnTemplate: "{{.Name",
-		},
-		{
-			title:       "valid empty template",
-			expectError: false,
-		},
-		{
-			title:        "valid template",
-			expectError:  false,
-			fqdnTemplate: "{{.Name}}-{{.Namespace}}.ext-dns.test.com",
-		},
-		{
-			title:        "valid template",
-			expectError:  false,
-			fqdnTemplate: "{{.Name}}-{{.Namespace}}.ext-dns.test.com, {{.Name}}-{{.Namespace}}.ext-dna.test.com",
-		},
-		{
-			title:                    "valid template",
-			expectError:              false,
-			fqdnTemplate:             "{{.Name}}-{{.Namespace}}.ext-dns.test.com, {{.Name}}-{{.Namespace}}.ext-dna.test.com",
-			combineFQDNAndAnnotation: true,
-		},
-		{
 			title:            "non-empty annotation filter label",
 			expectError:      false,
 			annotationFilter: "kubernetes.io/ingress.class=nginx",
@@ -146,13 +113,13 @@ func TestNewIngressSource(t *testing.T) {
 			annotationFilter:  "kubernetes.io/ingress.class=nginx",
 		},
 	} {
-		ti := ti
+
 		t.Run(ti.title, func(t *testing.T) {
 			t.Parallel()
 
 			_, err := NewIngressSource(
-				context.TODO(),
-				fake.NewSimpleClientset(),
+				t.Context(),
+				fake.NewClientset(),
 				"",
 				ti.annotationFilter,
 				ti.fqdnTemplate,
@@ -212,10 +179,24 @@ func testEndpointsFromIngress(t *testing.T) {
 			},
 		},
 		{
-			title: "one rule.host two lb.IP and two lb.Hostname",
+			title: "one rule.host one lb.IPv6",
+			ingress: fakeIngress{
+				dnsnames: []string{"foo.bar"},
+				ips:      []string{"2606:4700:4700::1111"},
+			},
+			expected: []*endpoint.Endpoint{
+				{
+					DNSName:    "foo.bar",
+					RecordType: endpoint.RecordTypeAAAA,
+					Targets:    endpoint.Targets{"2606:4700:4700::1111"},
+				},
+			},
+		},
+		{
+			title: "one rule.host two lb.IP, two lb.IPv6 and two lb.Hostname",
 			ingress: fakeIngress{
 				dnsnames:  []string{"foo.bar"},
-				ips:       []string{"8.8.8.8", "127.0.0.1"},
+				ips:       []string{"8.8.8.8", "127.0.0.1", "2606:4700:4700::1111", "2606:4700:4700::1001"},
 				hostnames: []string{"elb.com", "alb.com"},
 			},
 			expected: []*endpoint.Endpoint{
@@ -223,6 +204,11 @@ func testEndpointsFromIngress(t *testing.T) {
 					DNSName:    "foo.bar",
 					RecordType: endpoint.RecordTypeA,
 					Targets:    endpoint.Targets{"8.8.8.8", "127.0.0.1"},
+				},
+				{
+					DNSName:    "foo.bar",
+					RecordType: endpoint.RecordTypeAAAA,
+					Targets:    endpoint.Targets{"2606:4700:4700::1111", "2606:4700:4700::1001"},
 				},
 				{
 					DNSName:    "foo.bar",
@@ -263,6 +249,13 @@ func testEndpointsFromIngress(t *testing.T) {
 			},
 			expected:               []*endpoint.Endpoint{},
 			ignoreIngressRulesSpec: true,
+		},
+		{
+			title: "invalid hostname does not generate endpoints",
+			ingress: fakeIngress{
+				dnsnames: []string{"this-is-an-exceedingly-long-label-that-external-dns-should-reject.example.org"},
+			},
+			expected: []*endpoint.Endpoint{},
 		},
 	} {
 		t.Run(ti.title, func(t *testing.T) {
@@ -436,6 +429,30 @@ func testIngressEndpoints(t *testing.T) {
 				},
 			},
 			expected: []*endpoint.Endpoint{
+				{
+					DNSName:    "example.org",
+					RecordType: endpoint.RecordTypeAAAA,
+					Targets:    endpoint.Targets{"2001:DB8::1"},
+				},
+			},
+		},
+		{
+			title:           "dualstack ingress",
+			targetNamespace: "",
+			ingressItems: []fakeIngress{
+				{
+					name:      "fake1",
+					namespace: namespace,
+					dnsnames:  []string{"example.org"},
+					ips:       []string{"8.8.8.8", "2001:DB8::1"},
+				},
+			},
+			expected: []*endpoint.Endpoint{
+				{
+					DNSName:    "example.org",
+					RecordType: endpoint.RecordTypeA,
+					Targets:    endpoint.Targets{"8.8.8.8"},
+				},
 				{
 					DNSName:    "example.org",
 					RecordType: endpoint.RecordTypeAAAA,
@@ -1382,14 +1399,14 @@ func testIngressEndpoints(t *testing.T) {
 			expected: []*endpoint.Endpoint{},
 		},
 	} {
-		ti := ti
+
 		t.Run(ti.title, func(t *testing.T) {
 			t.Parallel()
 
-			fakeClient := fake.NewSimpleClientset()
+			fakeClient := fake.NewClientset()
 			for _, item := range ti.ingressItems {
 				ingress := item.Ingress()
-				_, err := fakeClient.NetworkingV1().Ingresses(ingress.Namespace).Create(context.Background(), ingress, metav1.CreateOptions{})
+				_, err := fakeClient.NetworkingV1().Ingresses(ingress.Namespace).Create(t.Context(), ingress, metav1.CreateOptions{})
 				require.NoError(t, err)
 			}
 
@@ -1411,13 +1428,18 @@ func testIngressEndpoints(t *testing.T) {
 				ti.ingressClassNames,
 			)
 			// Informer cache has all of the ingresses. Retrieve and validate their endpoints.
-			res, err := source.Endpoints(context.Background())
+			res, err := source.Endpoints(t.Context())
 			if ti.expectError {
 				require.Error(t, err)
 			} else {
 				require.NoError(t, err)
 			}
 			validateEndpoints(t, res, ti.expected)
+
+			// TODO; when all resources have the resource label, we could add this check to the validateEndpoints function.
+			for _, ep := range res {
+				require.Contains(t, ep.Labels, endpoint.ResourceLabelKey)
+			}
 		})
 	}
 }

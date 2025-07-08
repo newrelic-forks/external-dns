@@ -1,4 +1,4 @@
-# Setting up ExternalDNS on Google Kubernetes Engine
+# GKE with default controller
 
 This tutorial describes how to setup ExternalDNS for usage within a [GKE](https://cloud.google.com/kubernetes-engine) ([Google Kuberentes Engine](https://cloud.google.com/kubernetes-engine)) cluster. Make sure to use **>=0.11.0** version of ExternalDNS for this tutorial
 
@@ -6,7 +6,8 @@ This tutorial describes how to setup ExternalDNS for usage within a [GKE](https:
 
 *If you prefer to try-out ExternalDNS in one of the existing environments you can skip this step*
 
-The following instructions use [access scopes](https://cloud.google.com/compute/docs/access/service-accounts#accesscopesiam) to provide ExternalDNS with the permissions it needs to manage DNS records within a single [project](https://cloud.google.com/docs/overview#projects), the organizing entity to allocate resources.
+The following instructions use [access scopes](https://cloud.google.com/compute/docs/access/service-accounts#accesscopesiam) to provide ExternalDNS
+with the permissions it needs to manage DNS records within a single [project](https://cloud.google.com/docs/overview#projects), the organizing entity to allocate resources.
 
 Note that since these permissions are associated with the instance, all pods in the cluster will also have these permissions. As such, this approach is not suitable for anything but testing environments.
 
@@ -14,7 +15,7 @@ This solution will only work when both CloudDNS and GKE are provisioned in the s
 
 ### Configure Project Environment
 
-Setup your environment to work with Google Cloud Platform. Fill in your variables as needed, e.g. target project.
+Set up your environment to work with Google Cloud Platform. Fill in your variables as needed, e.g. target project.
 
 ```bash
 # set variables to the appropriate desired values
@@ -41,11 +42,16 @@ gcloud container clusters create $GKE_CLUSTER_NAME \
   --scopes "https://www.googleapis.com/auth/ndev.clouddns.readwrite"
 ```
 
-**WARNING**: Note that this cluster will use the default [compute engine GSA](https://cloud.google.com/compute/docs/access/service-accounts#default_service_account) that contians the overly permissive project editor (`roles/editor`) role. So essentially, anything on the cluster could potentially grant escalated privileges.  Also, as mentioned earlier, the access scope `ndev.clouddns.readwrite` will allow anything running on the cluster to have read/write permissions on all Cloud DNS zones within the same project.
+> [!WARNING]
+> Note that this cluster will use the default [compute engine GSA](https://cloud.google.com/compute/docs/access/service-accounts#default_service_account) that contians the overly permissive project editor (`roles/editor`) role.
+> So essentially, anything on the cluster could potentially grant escalated privileges.
+> Also, as mentioned earlier, the access scope `ndev.clouddns.readwrite` will allow anything running on the cluster to have read/write permissions on all Cloud DNS zones within the same project.
 
 ### Cloud DNS Zone
 
-Create a DNS zone which will contain the managed DNS records. If using your own domain that was registered with a third-party domain registrar, you should point your domain's name servers to the values under the `nameServers` key. Please consult your registrar's documentation on how to do that.  This tutorial will use example domain of  `example.com`.
+Create a DNS zone which will contain the managed DNS records.
+If using your own domain that was registered with a third-party domain registrar, you should point your domain's name servers to the values under the `nameServers` key.
+Please consult your registrar's documentation on how to do that. This tutorial will use example domain of `example.com`.
 
 ```bash
 gcloud dns managed-zones create "example-com" --dns-name "example.com." \
@@ -61,7 +67,7 @@ gcloud dns record-sets list \
 
 Outputs:
 
-```
+```sh
 NAME          TYPE  TTL    DATA
 example.com.  NS    21600  ns-cloud-e1.googledomains.com.,ns-cloud-e2.googledomains.com.,ns-cloud-e3.googledomains.com.,ns-cloud-e4.googledomains.com.
 ```
@@ -70,13 +76,14 @@ In this case it's `ns-cloud-{e1-e4}.googledomains.com.` but your's could slightl
 
 ## Cross project access scenario using Google Service Account
 
-More often, following best practices in regards to security and operations, Cloud DNS zones will be managed in a separate project from the Kubernetes cluster.  This section shows how setup ExternalDNS to access Cloud DNS from a different project. These steps will also work for single project scenarios as well.
+More often, following best practices in regards to security and operations, Cloud DNS zones will be managed in a separate project from the Kubernetes cluster.
+This section shows how setup ExternalDNS to access Cloud DNS from a different project. These steps will also work for single project scenarios as well.
 
 ExternalDNS will need permissions to make changes to the Cloud DNS zone. There are three ways to configure the access needed:
 
-* [Worker Node Service Account](#worker-node-service-account)
+* [Worker Node Service Account](#worker-node-service-account-method)
 * [Static Credentials](#static-credentials)
-* [Work Load Identity](#work-load-identity)
+* [Workload Identity](#workload-identity)
 
 ### Setup Cloud DNS and GKE
 
@@ -105,7 +112,7 @@ gcloud services enable "container.googleapis.com"
 
 #### Provisioning Cloud DNS
 
-Create a Cloud DNS zone in the designated DNS project.  
+Create a Cloud DNS zone in the designated DNS project.
 
 ```bash
 gcloud dns managed-zones create "example-com" --project $DNS_PROJECT_ID \
@@ -151,9 +158,96 @@ gcloud container clusters create $GKE_CLUSTER_NAME \
   --workload-pool "$GKE_PROJECT_ID.svc.id.goog"
 ```
 
+### Workload Identity
+
+[Workload Identity](https://cloud.google.com/kubernetes-engine/docs/how-to/workload-identity) allows workloads in your GKE cluster to [authenticate directly to GCP](https://cloud.google.com/kubernetes-engine/docs/concepts/workload-identity#credential-flow) using Kubernetes Service Accounts
+
+You have an option to chose from using the gcloud CLI or using Terraform.
+
+=== "gcloud CLI"
+
+    The below instructions assume you are using the default Kubernetes Service account name of `external-dns` in the namespace `external-dns`
+
+    Grant the Kubernetes service account DNS `roles/dns.admin` at project level
+
+    ```shell
+    gcloud projects add-iam-policy-binding projects/DNS_PROJECT_ID \
+        --role=roles/dns.admin \
+        --member=principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/PROJECT_ID.svc.id.goog/subject/ns/external-dns/sa/external-dns \
+        --condition=None
+    ```
+
+    Replace the following:
+
+    * `DNS_PROJECT_ID` : Project ID of your DNS project. If DNS is in the same project as your GKE cluster, use your GKE project.
+    * `PROJECT_ID`: your Google Cloud project ID of your GKE Cluster
+    * `PROJECT_NUMBER`: your numerical Google Cloud project number of your GKE cluster
+
+    If you wish to change the namespace, replace
+
+    * `ns/external-dns` with `ns/<your namespace`
+    * `sa/external-dns` with `sa/<your ksa>`
+
+=== "Terraform"
+
+    The below instructions assume you are using the default Kubernetes Service account name of `external-dns` in the namespace `external-dns`
+
+    Create a file called `main.tf` and place in it the below. _Note: If you're an experienced terraform user feel free to split these out in to different files_
+
+    ```hcl
+    variable "gke-project" {
+      type        = string
+      description = "Name of the project that the GKE cluster exists in"
+      default     = "GKE-PROJECT"
+    }
+
+    variable "ksa_name" {
+      type        = string
+      description = "Name of the Kubernetes service account that will be accessing the DNS Zones"
+      default     = "external-dns"
+    }
+
+    variable "kns_name" {
+      type        = string
+      description = "Name of the Kubernetes Namespace"
+      default     = "external-dns"
+    }
+
+    data "google_project" "project" {
+      project_id = var.gke-project
+    }
+
+    locals {
+      member = "principal://iam.googleapis.com/projects/${data.google_project.project.number}/locations/global/workloadIdentityPools/${var.gke-project}.svc.id.goog/subject/ns/${var.kns_name}/sa/${var.ksa_name}"
+    }
+
+    resource "google_project_iam_member" "external_dns" {
+      member  = local.member
+      project = "DNS-PROJECT"
+      role    = "roles/dns.reader"
+    }
+
+    resource "google_dns_managed_zone_iam_member" "member" {
+      project      = "DNS-PROJECT"
+      managed_zone = "ZONE-NAME"
+      role         = "roles/dns.admin"
+      member       = local.member
+    }
+    ```
+
+    Replace the following
+
+    * `GKE-PROJECT` : Project that contains your GKE cluster
+    * `DNS-PROJECT` : Project that holds your DNS zones
+
+    You can also change the below if you plan to use a different service account name and namespace
+
+    * `variable "ksa_name"` : Name of the Kubernetes service account external-dns will use
+    * `variable "kns_name"` : Name of the Kubernetes Name Space that will have external-dns installed to
+
 ### Worker Node Service Account method
 
-In this method, the GSA (Google Service Account) that is associated with GKE worker nodes will be configured to have access to Cloud DNS.  
+In this method, the GSA (Google Service Account) that is associated with GKE worker nodes will be configured to have access to Cloud DNS.
 
 **WARNING**: This will grant access to modify the Cloud DNS zone records for all containers running on cluster, not just ExternalDNS, so use this option with caution.  This is not recommended for production environments.
 
@@ -170,7 +264,7 @@ After this, follow the steps in [Deploy ExternalDNS](#deploy-externaldns).  Make
 
 ### Static Credentials
 
-In this scenario, a new GSA (Google Service Account) is created that has access to the CloudDNS zone.  The credentials for this GSA are saved and installed as a Kubernetes secret that will be used by ExternalDNS.  
+In this scenario, a new GSA (Google Service Account) is created that has access to the CloudDNS zone.  The credentials for this GSA are saved and installed as a Kubernetes secret that will be used by ExternalDNS.
 
 This allows only containers that have access to the secret, such as ExternalDNS to update records on the Cloud DNS Zone.
 
@@ -206,46 +300,15 @@ kubectl create secret generic "external-dns" --namespace ${EXTERNALDNS_NS:-"defa
 ```
 
 After this, follow the steps in [Deploy ExternalDNS](#deploy-externaldns).  Make sure to set the `--google-project` flag to match Cloud DNS project name. Make sure to uncomment out the section that mounts the secret to the ExternalDNS pods.
-### Workload Identity
-
-[Workload Identity](https://cloud.google.com/kubernetes-engine/docs/how-to/workload-identity) allows workloads in your GKE cluster to impersonate GSA (Google Service Accounts) using KSA (Kubernetes Service Accounts) configured during deployemnt.  These are the steps to use this feature with ExternalDNS.
-
-#### Create GSA for use with Workload Identity
-
-```bash
-DNS_SA_NAME="external-dns-sa"
-DNS_SA_EMAIL="$DNS_SA_NAME@${GKE_PROJECT_ID}.iam.gserviceaccount.com"
-
-gcloud iam service-accounts create $DNS_SA_NAME --display-name $DNS_SA_NAME
-gcloud projects add-iam-policy-binding $DNS_PROJECT_ID \
-   --member serviceAccount:$DNS_SA_EMAIL --role "roles/dns.admin"
-```
-
-#### Link KSA to GSA
-
-Add an IAM policy binding bewtween the workload identity GSA and ExternalDNS GSA.  This will link the ExternalDNS KSA to ExternalDNS GSA.
-
-```bash
-gcloud iam service-accounts add-iam-policy-binding $DNS_SA_EMAIL \
-  --role "roles/iam.workloadIdentityUser" \
-  --member "serviceAccount:$GKE_PROJECT_ID.svc.id.goog[${EXTERNALDNS_NS:-"default"}/external-dns]"
-```
 
 #### Deploy External DNS
 
 Deploy ExternalDNS with the following steps below, documented under [Deploy ExternalDNS](#deploy-externaldns).  Set the `--google-project` flag to the Cloud DNS project name.
 
-#### Link KSA to GSA in Kubernetes
-
-Add the proper workload identity annotation to the ExternalDNS KSA.
-
-```bash
-kubectl annotate serviceaccount "external-dns" \
-  --namespace ${EXTERNALDNS_NS:-"default"} \
-  "iam.gke.io/gcp-service-account=$DNS_SA_EMAIL"
-```
-
 #### Update ExternalDNS pods
+
+!!! note "Only required if not enabled on all nodes"
+    If you have GKE Workload Identity enabled on all nodes in your cluster, the below step is not necessary
 
 Update the Pod spec to schedule the workloads on nodes that use Workload Identity and to use the annotated Kubernetes service account.
 
@@ -304,7 +367,7 @@ kind: Deployment
 metadata:
   name: external-dns
   labels:
-    app.kubernetes.io/name: external-dns  
+    app.kubernetes.io/name: external-dns
 spec:
   strategy:
     type: Recreate
@@ -319,7 +382,7 @@ spec:
       serviceAccountName: external-dns
       containers:
         - name: external-dns
-          image: registry.k8s.io/external-dns/external-dns:v0.13.5
+          image: registry.k8s.io/external-dns/external-dns:v0.17.0
           args:
             - --source=service
             - --source=ingress
@@ -331,7 +394,7 @@ spec:
             - --policy=upsert-only # would prevent ExternalDNS from deleting any records, omit to enable full synchronization
             - --registry=txt
             - --txt-owner-id=my-identifier
-      #     # uncomment below if static credentials are used  
+      #     # uncomment below if static credentials are used
       #     env:
       #       - name: GOOGLE_APPLICATION_CREDENTIALS
       #         value: /etc/secrets/service-account/credentials.json
@@ -408,7 +471,7 @@ gcloud dns record-sets list --zone "example-com" --name "nginx.example.com."
 
 Example output:
 
-```
+```sh
 NAME                TYPE  TTL  DATA
 nginx.example.com.  A     300  104.155.60.49
 nginx.example.com.  TXT   300  "heritage=external-dns,external-dns/owner=my-identifier"
@@ -458,7 +521,8 @@ Create the ingress objects with:
 kubectl create --namespace "default" --filename ingress.yaml
 ```
 
-Note that this will ingress object will use the default ingress controller that comes with GKE to create a L7 load balancer in addition to the L4 load balancer previously with the service object.  To use only the L7 load balancer, update the service manafest to change the Service type to `NodePort` and remove the ExternalDNS annotation.
+Note that this will ingress object will use the default ingress controller that comes with GKE to create a L7 load balancer in addition to the L4 load balancer previously with the service object.
+To use only the L7 load balancer, update the service manafest to change the Service type to `NodePort` and remove the ExternalDNS annotation.
 
 After roughly two minutes check that a corresponding DNS record for your Ingress was created.
 
@@ -467,9 +531,10 @@ gcloud dns record-sets list \
     --zone "example-com" \
     --name "server.example.com." \
 ```
+
 Output:
 
-```
+```sh
 NAME                 TYPE  TTL  DATA
 server.example.com.  A     300  130.211.46.224
 server.example.com.  TXT   300  "heritage=external-dns,external-dns/owner=my-identifier"

@@ -12,47 +12,38 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# cover-html creates coverage report for whole project excluding vendor and opens result in the default browser
+#? cover: Creates coverage report for whole project excluding vendor and opens result in the default browser
 .PHONY: cover cover-html
 .DEFAULT_GOAL := build
 
 cover:
-	go get github.com/wadey/gocovmerge
-	$(eval PKGS := $(shell go list ./... | grep -v /vendor/))
-	$(eval PKGS_DELIM := $(shell echo $(PKGS) | tr / -'))
-	go list -f '{{if or (len .TestGoFiles) (len .XTestGoFiles)}}go test -test.v -test.timeout=120s -covermode=count -coverprofile={{.Name}}_{{len .Imports}}_{{len .Deps}}.coverprofile -coverpkg $(PKGS_DELIM) {{.ImportPath}}{{end}}' $(PKGS) | xargs -0 sh -c
-	gocovmerge `ls *.coverprofile` > cover.out
-	rm *.coverprofile
+	@go test -cover -coverprofile=cover.out -v ./...
 
+#? cover-html: Run tests with coverage and open coverage report in the browser
 cover-html: cover
-	go tool cover -html cover.out
+	@go tool cover -html=cover.out
 
-# find or download controller-gen
-# download controller-gen if necessary
-controller-gen:
+#? controller-gen: download controller-gen if necessary
+controller-gen-install:
+	@scripts/install-tools.sh --generator
 ifeq (, $(shell which controller-gen))
-	@{ \
-	set -e ;\
-	CONTROLLER_GEN_TMP_DIR=$$(mktemp -d) ;\
-	cd $$CONTROLLER_GEN_TMP_DIR ;\
-	go mod init tmp ;\
-	go get sigs.k8s.io/controller-tools/cmd/controller-gen@v0.5.0 ;\
-	rm -rf $$CONTROLLER_GEN_TMP_DIR ;\
-	}
 CONTROLLER_GEN=$(GOBIN)/controller-gen
 else
 CONTROLLER_GEN=$(shell which controller-gen)
 endif
 
-golangci-lint:
-	@command -v golangci-lint > /dev/null || curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.53.3
+#? golangci-lint-install: Install golangci-lint tool
+golangci-lint-install:
+	@scripts/install-tools.sh --golangci
 
-# Run the golangci-lint tool
+#? go-lint: Run the golangci-lint tool
 .PHONY: go-lint
-go-lint: golangci-lint
-	golangci-lint run --timeout=30m ./...
+go-lint: golangci-lint-install
+	golangci-lint config verify
+	gofmt -l -s -w .
+	golangci-lint run --timeout=30m --fix ./...
 
-# Run the licensecheck script to check for license headers
+#? licensecheck: Run the to check for license headers
 .PHONY: licensecheck
 licensecheck:
 	@echo ">> checking license header"
@@ -64,21 +55,27 @@ licensecheck:
                exit 1; \
        fi
 
-# Run all the linters
+#? oas-lint: Requires to install spectral. See github.com/stoplightio/spectral
+oas-lint:
+	spectral lint api/*.yaml
+
+#? lint: Run all the linters
 .PHONY: lint
-lint: licensecheck go-lint
+lint: licensecheck go-lint oas-lint
 
-# generates CRD using controller-gen
+#? crd: Generates CRD using controller-gen and copy it into chart
 .PHONY: crd
-crd: controller-gen
-	${CONTROLLER_GEN} crd:crdVersions=v1 paths="./endpoint/..." output:crd:stdout > docs/contributing/crd-source/crd-manifest.yaml
+crd: controller-gen-install
+	${CONTROLLER_GEN} object crd:crdVersions=v1 paths="./endpoint/..."
+	${CONTROLLER_GEN} object crd:crdVersions=v1 paths="./apis/..." output:crd:stdout | yamlfmt - | yq eval '.' --no-doc --split-exp '"./config/crd/standard/" + .metadata.name + ".yaml"'
+	yq eval '.metadata.annotations |= with_entries(select(.key | test("kubernetes\.io")))' --no-doc --split-exp '"./charts/external-dns/crds/" + .metadata.name + ".yaml"' ./config/crd/standard/*.yaml
 
-# The verify target runs tasks similar to the CI tasks, but without code coverage
+#? test: The verify target runs tasks similar to the CI tasks, but without code coverage
 .PHONY: test
 test:
 	go test -race -coverprofile=profile.cov ./...
 
-# The build targets allow to build the binary and container image
+#? build: The build targets allow to build the binary and container image
 .PHONY: build
 
 BINARY        ?= external-dns
@@ -87,8 +84,10 @@ IMAGE_STAGING  = gcr.io/k8s-staging-external-dns/$(BINARY)
 REGISTRY      ?= us.gcr.io/k8s-artifacts-prod/external-dns
 IMAGE         ?= $(REGISTRY)/$(BINARY)
 VERSION       ?= $(shell git describe --tags --always --dirty --match "v*")
+GIT_COMMIT    ?= $(shell git rev-parse --short HEAD)
 BUILD_FLAGS   ?= -v
 LDFLAGS       ?= -X sigs.k8s.io/external-dns/pkg/apis/externaldns.Version=$(VERSION) -w -s
+LDFLAGS       += -X sigs.k8s.io/external-dns/pkg/apis/externaldns.GitCommit=$(GIT_COMMIT)
 ARCH          ?= amd64
 SHELL          = /bin/bash
 IMG_PLATFORM  ?= linux/amd64,linux/arm64,linux/arm/v7
@@ -103,7 +102,10 @@ build/$(BINARY): $(SOURCES)
 build.push/multiarch: ko
 	KO_DOCKER_REPO=${IMAGE} \
     VERSION=${VERSION} \
-    ko build --tags ${VERSION} --platform=${IMG_PLATFORM} --bare --sbom ${IMG_SBOM} --push=${IMG_PUSH} .
+    ko build --tags ${VERSION} --bare --sbom ${IMG_SBOM} \
+      --image-label org.opencontainers.image.source="https://github.com/kubernetes-sigs/external-dns" \
+      --image-label org.opencontainers.image.revision=$(shell git rev-parse HEAD) \
+      --platform=${IMG_PLATFORM}  --push=${IMG_PUSH} .
 
 build.image/multiarch:
 	$(MAKE) IMG_PUSH=false build.push/multiarch
@@ -145,9 +147,8 @@ clean:
 	@rm -rf build
 	@go clean -cache
 
- # Builds and push container images to the staging bucket.
 .PHONY: release.staging
-
+#? release.staging: Builds and push container images to the staging bucket.
 release.staging: test
 	IMAGE=$(IMAGE_STAGING) $(MAKE) build.push/multiarch
 
@@ -157,3 +158,55 @@ release.prod: test
 .PHONY: ko
 ko:
 	scripts/install-ko.sh
+
+.PHONY: generate-flags-documentation
+#? generate-flags-documentation: Generate documentation (docs/flags.md)
+generate-flags-documentation:
+	go run internal/gen/docs/flags/main.go
+
+.PHONY: generate-metrics-documentation
+#? generate-metrics-documentation: Generate documentation (docs/monitoring/metrics.md)
+generate-metrics-documentation:
+	go run internal/gen/docs/metrics/main.go
+
+#? pre-commit-install: Install pre-commit hooks
+pre-commit-install:
+	@pre-commit install
+	@pre-commit gc
+
+#? pre-commit-uninstall: Uninstall pre-commit hooks
+pre-commit-uninstall:
+	@pre-commit uninstall
+
+#? pre-commit-validate: Validate files with pre-commit hooks
+pre-commit-validate:
+	@pre-commit run --all-files
+
+.PHONY: help
+#? help: Get more info on available commands
+help: Makefile
+	@sed -n 's/^#?//p' $< | column -t -s ':' |  sort | sed -e 's/^/ /'
+
+#? helm-test: Run unit tests
+helm-test:
+	scripts/helm-tools.sh --helm-unittest
+
+#? helm-template: Run helm template
+helm-template:
+	scripts/helm-tools.sh --helm-template
+
+#? helm-lint: Run helm linting (schema,docs)
+helm-lint:
+	scripts/helm-tools.sh --schema
+	scripts/helm-tools.sh --docs
+
+.PHONY: go-dependency
+#? go-dependency: Dependency maintanance
+go-dependency:
+	go mod tidy
+
+.PHONY: mkdocs-serve
+#? mkdocs-serve: Run the builtin development server for mkdocs
+mkdocs-serve:
+	@$(info "contribute to documentation docs/contributing/dev-guide.md")
+	@mkdocs serve

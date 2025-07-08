@@ -1,15 +1,19 @@
-# Setting up ExternalDNS for Services on DNSimple
-
+# DNSimple
 
 This tutorial describes how to setup ExternalDNS for usage with DNSimple.
 
 Make sure to use **>=0.4.6** version of ExternalDNS for this tutorial.
 
-## Created a DNSimple API Access Token
+## Create a DNSimple API Access Token
 
 A DNSimple API access token can be acquired by following the [provided documentation from DNSimple](https://support.dnsimple.com/articles/api-access-token/)
 
-The environment variable `DNSIMPLE_OAUTH` must be set to the API token generated for to run ExternalDNS with DNSimple.
+The environment variable `DNSIMPLE_OAUTH` must be set to the generated API token to run ExternalDNS with DNSimple.
+
+When the generated DNSimple API access token is a _User token_, as opposed to an _Account token_, the following environment variables must also be set:
+
+- `DNSIMPLE_ACCOUNT_ID`: Set this to the account ID which the domains to be managed by ExternalDNS belong to (eg. `1001234`).
+- `DNSIMPLE_ZONES`: Set this to a comma separated list of DNS zones to be managed by ExternalDNS (eg. `mydomain.com,example.com`).
 
 ## Deploy ExternalDNS
 
@@ -17,6 +21,7 @@ Connect your `kubectl` client to the cluster you want to test ExternalDNS with.
 Then apply one of the following manifests file to deploy ExternalDNS.
 
 ### Manifest (for clusters without RBAC enabled)
+
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -35,7 +40,7 @@ spec:
     spec:
       containers:
       - name: external-dns
-        image: registry.k8s.io/external-dns/external-dns:v0.13.5
+        image: registry.k8s.io/external-dns/external-dns:v0.17.0
         args:
         - --source=service
         - --domain-filter=example.com # (optional) limit to only example.com domains; change to match the zone you create in DNSimple.
@@ -44,6 +49,10 @@ spec:
         env:
         - name: DNSIMPLE_OAUTH
           value: "YOUR_DNSIMPLE_API_KEY"
+        - name: DNSIMPLE_ACCOUNT_ID
+          value: "SET THIS IF USING A DNSIMPLE USER ACCESS TOKEN"
+        - name: DNSIMPLE_ZONES
+          value: "SET THIS IF USING A DNSIMPLE USER ACCESS TOKEN"
 ```
 
 ### Manifest (for clusters with RBAC enabled)
@@ -100,7 +109,7 @@ spec:
       serviceAccountName: external-dns
       containers:
       - name: external-dns
-        image: registry.k8s.io/external-dns/external-dns:v0.13.5
+        image: registry.k8s.io/external-dns/external-dns:v0.17.0
         args:
         - --source=service
         - --domain-filter=example.com # (optional) limit to only example.com domains; change to match the zone you create in DNSimple.
@@ -109,8 +118,11 @@ spec:
         env:
         - name: DNSIMPLE_OAUTH
           value: "YOUR_DNSIMPLE_API_KEY"
+        - name: DNSIMPLE_ACCOUNT_ID
+          value: "SET THIS IF USING A DNSIMPLE USER ACCESS TOKEN"
+        - name: DNSIMPLE_ZONES
+          value: "SET THIS IF USING A DNSIMPLE USER ACCESS TOKEN"
 ```
-
 
 ## Deploying an Nginx Service
 
@@ -160,7 +172,7 @@ ExternalDNS uses this annotation to determine what services should be registered
 Create the deployment and service:
 
 ```sh
-$ kubectl create -f nginx.yaml
+kubectl create -f nginx.yaml
 ```
 
 Depending where you run your service it can take a little while for your cloud provider to create an external IP for the service. Check the status by running
@@ -199,7 +211,8 @@ You can view your DNSimple Record Editor at https://dnsimple.com/a/YOUR_ACCOUNT_
 
 ### Using the DNSimple Zone Records API
 
-This approach allows for you to use the DNSimple [List records for a zone](https://developer.dnsimple.com/v2/zones/records/#listZoneRecords) endpoint to verify the creation of the A and TXT record. Ensure you substitute the value `YOUR_ACCOUNT_ID` with the ID of your DNSimple account and `example.com` with the correct domain that you used during validation.
+This approach allows for you to use the DNSimple [List records for a zone](https://developer.dnsimple.com/v2/zones/records/#listZoneRecords) endpoint to verify the creation of the A and TXT record.
+Ensure you substitute the value `YOUR_ACCOUNT_ID` with the ID of your DNSimple account and `example.com` with the correct domain that you used during validation.
 
 ```sh
 curl -H "Authorization: Bearer $DNSIMPLE_ACCOUNT_TOKEN" \
@@ -212,8 +225,8 @@ curl -H "Authorization: Bearer $DNSIMPLE_ACCOUNT_TOKEN" \
 Now that we have verified that ExternalDNS will automatically manage DNSimple DNS records, we can delete the tutorial's example:
 
 ```sh
-$ kubectl delete -f nginx.yaml
-$ kubectl delete -f externaldns.yaml
+kubectl delete -f nginx.yaml
+kubectl delete -f externaldns.yaml
 ```
 
 ### Deleting Created Records

@@ -1,6 +1,6 @@
-# Setting up ExternalDNS for Services on GoDaddy
+# GoDaddy
 
-This tutorial describes how to setup ExternalDNS for use within a
+This tutorial describes how to set up ExternalDNS for use within a
 Kubernetes cluster using GoDaddy DNS.
 
 Make sure to use **>=0.6** version of ExternalDNS for this tutorial.
@@ -24,6 +24,26 @@ Using the [GoDaddy documentation](https://developer.godaddy.com/getstarted) you 
 
 Connect your `kubectl` client to the cluster with which you want to test ExternalDNS, and then apply one of the following manifest files for deployment:
 
+## Using Helm
+
+Create a values.yaml file to configure ExternalDNS to use GoDaddy as the DNS provider. This file should include the necessary environment variables:
+
+```shell
+provider:
+  name: godaddy
+extraArgs:
+  - --godaddy-api-key=YOUR_API_KEY
+  - --godaddy-api-secret=YOUR_API_SECRET
+```
+
+Be sure to replace YOUR_API_KEY and YOUR_API_SECRET with your actual GoDaddy API key and GoDaddy API secret.
+
+Finally, install the ExternalDNS chart with Helm using the configuration specified in your values.yaml file:
+
+```shell
+helm upgrade --install external-dns external-dns/external-dns --values values.yaml
+```
+
 ### Manifest (for clusters without RBAC enabled)
 
 ```yaml
@@ -44,7 +64,7 @@ spec:
     spec:
       containers:
       - name: external-dns
-        image: registry.k8s.io/external-dns/external-dns:v0.13.5
+        image: registry.k8s.io/external-dns/external-dns:v0.17.0
         args:
         - --source=service # ingress is also possible
         - --domain-filter=example.com # (optional) limit to only example.com domains; change to match the zone created above.
@@ -115,7 +135,7 @@ spec:
       serviceAccountName: external-dns
       containers:
       - name: external-dns
-        image: registry.k8s.io/external-dns/external-dns:v0.13.5
+        image: registry.k8s.io/external-dns/external-dns:v0.17.0
         args:
         - --source=service # ingress is also possible
         - --domain-filter=example.com # (optional) limit to only example.com domains; change to match the zone created above.
@@ -177,8 +197,8 @@ ExternalDNS uses the hostname annotation to determine which services should be r
 
 ### Create the deployment and service
 
-```
-$ kubectl create -f nginx.yaml
+```sh
+kubectl create -f nginx.yaml
 ```
 
 Depending on where you run your service, it may take some time for your cloud provider to create an external IP for the service. Once an external IP is assigned, ExternalDNS detects the new service IP address and synchronizes the GoDaddy DNS records.
@@ -191,7 +211,7 @@ Use the GoDaddy web console or API to verify that the A record for your domain s
 
 Once you successfully configure and verify record management via ExternalDNS, you can delete the tutorial's example:
 
-```
-$ kubectl delete -f nginx.yaml
-$ kubectl delete -f externaldns.yaml
+```sh
+kubectl delete -f nginx.yaml
+kubectl delete -f externaldns.yaml
 ```

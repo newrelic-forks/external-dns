@@ -33,7 +33,6 @@ import (
 type EgoscaleClientI interface {
 	ListDNSDomainRecords(context.Context, string, string) ([]egoscale.DNSDomainRecord, error)
 	ListDNSDomains(context.Context, string) ([]egoscale.DNSDomain, error)
-	GetDNSDomainRecord(context.Context, string, string, string) (*egoscale.DNSDomainRecord, error)
 	CreateDNSDomainRecord(context.Context, string, string, *egoscale.DNSDomainRecord) (*egoscale.DNSDomainRecord, error)
 	DeleteDNSDomainRecord(context.Context, string, string, *egoscale.DNSDomainRecord) error
 	UpdateDNSDomainRecord(context.Context, string, string, *egoscale.DNSDomainRecord) error
@@ -42,7 +41,7 @@ type EgoscaleClientI interface {
 // ExoscaleProvider initialized as dns provider with no records
 type ExoscaleProvider struct {
 	provider.BaseProvider
-	domain         endpoint.DomainFilter
+	domain         *endpoint.DomainFilter
 	client         EgoscaleClientI
 	apiEnv         string
 	apiZone        string
@@ -160,14 +159,9 @@ func (ep *ExoscaleProvider) ApplyChanges(ctx context.Context, changes *plan.Chan
 			return err
 		}
 
-		for _, r := range records {
-			if *r.Name != name {
+		for _, record := range records {
+			if *record.Name != name {
 				continue
-			}
-
-			record, err := ep.client.GetDNSDomainRecord(ctx, ep.apiZone, zoneID, *r.ID)
-			if err != nil {
-				return err
 			}
 
 			record.Type = &epoint.RecordType
@@ -177,7 +171,7 @@ func (ep *ExoscaleProvider) ApplyChanges(ctx context.Context, changes *plan.Chan
 				record.TTL = &ttl
 			}
 
-			err = ep.client.UpdateDNSDomainRecord(ctx, ep.apiZone, zoneID, record)
+			err = ep.client.UpdateDNSDomainRecord(ctx, ep.apiZone, zoneID, &record)
 			if err != nil {
 				return err
 			}
@@ -187,7 +181,7 @@ func (ep *ExoscaleProvider) ApplyChanges(ctx context.Context, changes *plan.Chan
 	}
 
 	for _, epoint := range changes.UpdateOld {
-		// Since Exoscale "Patches", we ignore UpdateOld
+		// Since Exoscale "Patches", we've ignored UpdateOld
 		// We leave this logging here for information
 		log.Debugf("UPDATE-OLD (ignored) for epoint: %+v", epoint)
 	}
@@ -240,19 +234,12 @@ func (ep *ExoscaleProvider) Records(ctx context.Context) ([]*endpoint.Endpoint, 
 			return nil, err
 		}
 
-		for _, r := range records {
-			record, err := ep.client.GetDNSDomainRecord(ctx, ep.apiZone, *domain.ID, *r.ID)
-			if err != nil {
-				return nil, err
-			}
-			switch *record.Type {
-			case "A", "CNAME", "TXT":
-				break
-			default:
+		for _, record := range records {
+			if *record.Type != endpoint.RecordTypeA && *record.Type != endpoint.RecordTypeCNAME && *record.Type != endpoint.RecordTypeTXT {
 				continue
 			}
 
-			e := endpoint.NewEndpointWithTTL((*record.Name)+"."+(*domain.UnicodeName), *record.Type, endpoint.TTL(*r.TTL), *record.Content)
+			e := endpoint.NewEndpointWithTTL((*record.Name)+"."+(*domain.UnicodeName), *record.Type, endpoint.TTL(*record.TTL), *record.Content)
 			endpoints = append(endpoints, e)
 		}
 	}
@@ -262,7 +249,7 @@ func (ep *ExoscaleProvider) Records(ctx context.Context) ([]*endpoint.Endpoint, 
 }
 
 // ExoscaleWithDomain modifies the domain on which dns zones are filtered
-func ExoscaleWithDomain(domainFilter endpoint.DomainFilter) ExoscaleOption {
+func ExoscaleWithDomain(domainFilter *endpoint.DomainFilter) ExoscaleOption {
 	return func(p *ExoscaleProvider) {
 		p.domain = domainFilter
 	}
@@ -320,10 +307,10 @@ func (f *zoneFilter) EndpointZoneID(endpoint *endpoint.Endpoint, zones map[strin
 
 func merge(updateOld, updateNew []*endpoint.Endpoint) []*endpoint.Endpoint {
 	findMatch := func(template *endpoint.Endpoint) *endpoint.Endpoint {
-		for _, new := range updateNew {
-			if template.DNSName == new.DNSName &&
-				template.RecordType == new.RecordType {
-				return new
+		for _, record := range updateNew {
+			if template.DNSName == record.DNSName &&
+				template.RecordType == record.RecordType {
+				return record
 			}
 		}
 		return nil
@@ -333,7 +320,7 @@ func merge(updateOld, updateNew []*endpoint.Endpoint) []*endpoint.Endpoint {
 	for _, old := range updateOld {
 		matchingNew := findMatch(old)
 		if matchingNew == nil {
-			// no match, shouldn't happen
+			// no match shouldn't happen
 			continue
 		}
 

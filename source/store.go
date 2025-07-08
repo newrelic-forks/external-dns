@@ -18,6 +18,8 @@ package source
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -27,7 +29,6 @@ import (
 	"github.com/cloudfoundry-community/go-cfclient"
 	"github.com/linki/instrumented_http"
 	openshift "github.com/openshift/client-go/route/clientset/versioned"
-	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 	istioclient "istio.io/client-go/pkg/clientset/versioned"
 	"k8s.io/apimachinery/pkg/labels"
@@ -36,6 +37,8 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	gateway "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
+
+	"sigs.k8s.io/external-dns/pkg/apis/externaldns"
 )
 
 // ErrSourceNotFound is returned when a requested source doesn't exist.
@@ -50,11 +53,15 @@ type Config struct {
 	FQDNTemplate                   string
 	CombineFQDNAndAnnotation       bool
 	IgnoreHostnameAnnotation       bool
+	IgnoreNonHostNetworkPods       bool
 	IgnoreIngressTLSSpec           bool
 	IgnoreIngressRulesSpec         bool
+	ListenEndpointEvents           bool
+	GatewayName                    string
 	GatewayNamespace               string
 	GatewayLabelFilter             string
 	Compatibility                  string
+	PodSourceDomain                string
 	PublishInternal                bool
 	PublishHostIP                  bool
 	AlwaysPublishNotReadyAddresses bool
@@ -67,13 +74,65 @@ type Config struct {
 	CFAPIEndpoint                  string
 	CFUsername                     string
 	CFPassword                     string
-	GlooNamespace                  string
+	GlooNamespaces                 []string
 	SkipperRouteGroupVersion       string
 	RequestTimeout                 time.Duration
 	DefaultTargets                 []string
+	ForceDefaultTargets            bool
 	OCPRouterName                  string
 	UpdateEvents                   bool
 	ResolveLoadBalancerHostname    bool
+	TraefikDisableLegacy           bool
+	TraefikDisableNew              bool
+	ExcludeUnschedulable           bool
+	ExposeInternalIPv6             bool
+}
+
+func NewSourceConfig(cfg *externaldns.Config) *Config {
+	// error is explicitly ignored because the filter is already validated in validation.ValidateConfig
+	labelSelector, _ := labels.Parse(cfg.LabelFilter)
+	return &Config{
+		Namespace:                      cfg.Namespace,
+		AnnotationFilter:               cfg.AnnotationFilter,
+		LabelFilter:                    labelSelector,
+		IngressClassNames:              cfg.IngressClassNames,
+		FQDNTemplate:                   cfg.FQDNTemplate,
+		CombineFQDNAndAnnotation:       cfg.CombineFQDNAndAnnotation,
+		IgnoreHostnameAnnotation:       cfg.IgnoreHostnameAnnotation,
+		IgnoreNonHostNetworkPods:       cfg.IgnoreNonHostNetworkPods,
+		IgnoreIngressTLSSpec:           cfg.IgnoreIngressTLSSpec,
+		IgnoreIngressRulesSpec:         cfg.IgnoreIngressRulesSpec,
+		ListenEndpointEvents:           cfg.ListenEndpointEvents,
+		GatewayName:                    cfg.GatewayName,
+		GatewayNamespace:               cfg.GatewayNamespace,
+		GatewayLabelFilter:             cfg.GatewayLabelFilter,
+		Compatibility:                  cfg.Compatibility,
+		PodSourceDomain:                cfg.PodSourceDomain,
+		PublishInternal:                cfg.PublishInternal,
+		PublishHostIP:                  cfg.PublishHostIP,
+		AlwaysPublishNotReadyAddresses: cfg.AlwaysPublishNotReadyAddresses,
+		ConnectorServer:                cfg.ConnectorSourceServer,
+		CRDSourceAPIVersion:            cfg.CRDSourceAPIVersion,
+		CRDSourceKind:                  cfg.CRDSourceKind,
+		KubeConfig:                     cfg.KubeConfig,
+		APIServerURL:                   cfg.APIServerURL,
+		ServiceTypeFilter:              cfg.ServiceTypeFilter,
+		CFAPIEndpoint:                  cfg.CFAPIEndpoint,
+		CFUsername:                     cfg.CFUsername,
+		CFPassword:                     cfg.CFPassword,
+		GlooNamespaces:                 cfg.GlooNamespaces,
+		SkipperRouteGroupVersion:       cfg.SkipperRouteGroupVersion,
+		RequestTimeout:                 cfg.RequestTimeout,
+		DefaultTargets:                 cfg.DefaultTargets,
+		ForceDefaultTargets:            cfg.ForceDefaultTargets,
+		OCPRouterName:                  cfg.OCPRouterName,
+		UpdateEvents:                   cfg.UpdateEvents,
+		ResolveLoadBalancerHostname:    cfg.ResolveServiceLoadBalancerHostname,
+		TraefikDisableLegacy:           cfg.TraefikDisableLegacy,
+		TraefikDisableNew:              cfg.TraefikDisableNew,
+		ExcludeUnschedulable:           cfg.ExcludeUnschedulable,
+		ExposeInternalIPv6:             cfg.ExposeInternalIPV6,
+	}
 }
 
 // ClientGenerator provides clients
@@ -202,7 +261,7 @@ func ByNames(ctx context.Context, p ClientGenerator, names []string, cfg *Config
 	return sources, nil
 }
 
-// BuildWithConfig allows to generate a Source implementation from the shared config
+// BuildWithConfig allows generating a Source implementation from the shared config
 func BuildWithConfig(ctx context.Context, source string, p ClientGenerator, cfg *Config) (Source, error) {
 	switch source {
 	case "node":
@@ -210,13 +269,13 @@ func BuildWithConfig(ctx context.Context, source string, p ClientGenerator, cfg 
 		if err != nil {
 			return nil, err
 		}
-		return NewNodeSource(ctx, client, cfg.AnnotationFilter, cfg.FQDNTemplate)
+		return NewNodeSource(ctx, client, cfg.AnnotationFilter, cfg.FQDNTemplate, cfg.LabelFilter, cfg.ExposeInternalIPv6, cfg.ExcludeUnschedulable, cfg.CombineFQDNAndAnnotation)
 	case "service":
 		client, err := p.KubeClient()
 		if err != nil {
 			return nil, err
 		}
-		return NewServiceSource(ctx, client, cfg.Namespace, cfg.AnnotationFilter, cfg.FQDNTemplate, cfg.CombineFQDNAndAnnotation, cfg.Compatibility, cfg.PublishInternal, cfg.PublishHostIP, cfg.AlwaysPublishNotReadyAddresses, cfg.ServiceTypeFilter, cfg.IgnoreHostnameAnnotation, cfg.LabelFilter, cfg.ResolveLoadBalancerHostname)
+		return NewServiceSource(ctx, client, cfg.Namespace, cfg.AnnotationFilter, cfg.FQDNTemplate, cfg.CombineFQDNAndAnnotation, cfg.Compatibility, cfg.PublishInternal, cfg.PublishHostIP, cfg.AlwaysPublishNotReadyAddresses, cfg.ServiceTypeFilter, cfg.IgnoreHostnameAnnotation, cfg.LabelFilter, cfg.ResolveLoadBalancerHostname, cfg.ListenEndpointEvents, cfg.ExposeInternalIPv6)
 	case "ingress":
 		client, err := p.KubeClient()
 		if err != nil {
@@ -228,7 +287,7 @@ func BuildWithConfig(ctx context.Context, source string, p ClientGenerator, cfg 
 		if err != nil {
 			return nil, err
 		}
-		return NewPodSource(ctx, client, cfg.Namespace, cfg.Compatibility)
+		return NewPodSource(ctx, client, cfg.Namespace, cfg.Compatibility, cfg.IgnoreNonHostNetworkPods, cfg.PodSourceDomain, cfg.FQDNTemplate, cfg.CombineFQDNAndAnnotation)
 	case "gateway-httproute":
 		return NewGatewayHTTPRouteSource(p, cfg)
 	case "gateway-grpcroute":
@@ -274,7 +333,7 @@ func BuildWithConfig(ctx context.Context, source string, p ClientGenerator, cfg 
 		if err != nil {
 			return nil, err
 		}
-		return NewAmbassadorHostSource(ctx, dynamicClient, kubernetesClient, cfg.Namespace)
+		return NewAmbassadorHostSource(ctx, dynamicClient, kubernetesClient, cfg.Namespace, cfg.AnnotationFilter, cfg.LabelFilter)
 	case "contour-httpproxy":
 		dynamicClient, err := p.DynamicKubernetesClient()
 		if err != nil {
@@ -290,7 +349,7 @@ func BuildWithConfig(ctx context.Context, source string, p ClientGenerator, cfg 
 		if err != nil {
 			return nil, err
 		}
-		return NewGlooSource(dynamicClient, kubernetesClient, cfg.GlooNamespace)
+		return NewGlooSource(dynamicClient, kubernetesClient, cfg.GlooNamespaces)
 	case "traefik-proxy":
 		kubernetesClient, err := p.KubeClient()
 		if err != nil {
@@ -300,7 +359,7 @@ func BuildWithConfig(ctx context.Context, source string, p ClientGenerator, cfg 
 		if err != nil {
 			return nil, err
 		}
-		return NewTraefikSource(ctx, dynamicClient, kubernetesClient, cfg.Namespace, cfg.AnnotationFilter)
+		return NewTraefikSource(ctx, dynamicClient, kubernetesClient, cfg.Namespace, cfg.AnnotationFilter, cfg.IgnoreHostnameAnnotation, cfg.TraefikDisableLegacy, cfg.TraefikDisableNew)
 	case "openshift-route":
 		ocpClient, err := p.OpenShiftClient()
 		if err != nil {
@@ -341,7 +400,7 @@ func BuildWithConfig(ctx context.Context, source string, p ClientGenerator, cfg 
 		if err != nil {
 			return nil, err
 		}
-		return NewKongTCPIngressSource(ctx, dynamicClient, kubernetesClient, cfg.Namespace, cfg.AnnotationFilter)
+		return NewKongTCPIngressSource(ctx, dynamicClient, kubernetesClient, cfg.Namespace, cfg.AnnotationFilter, cfg.IgnoreHostnameAnnotation)
 	case "f5-virtualserver":
 		kubernetesClient, err := p.KubeClient()
 		if err != nil {
@@ -352,6 +411,16 @@ func BuildWithConfig(ctx context.Context, source string, p ClientGenerator, cfg 
 			return nil, err
 		}
 		return NewF5VirtualServerSource(ctx, dynamicClient, kubernetesClient, cfg.Namespace, cfg.AnnotationFilter)
+	case "f5-transportserver":
+		kubernetesClient, err := p.KubeClient()
+		if err != nil {
+			return nil, err
+		}
+		dynamicClient, err := p.DynamicKubernetesClient()
+		if err != nil {
+			return nil, err
+		}
+		return NewF5TransportServerSource(ctx, dynamicClient, kubernetesClient, cfg.Namespace, cfg.AnnotationFilter)
 	}
 
 	return nil, ErrSourceNotFound
@@ -443,7 +512,7 @@ func NewIstioClient(kubeConfig string, apiServerURL string) (*istioclient.Client
 
 	ic, err := istioclient.NewForConfig(restCfg)
 	if err != nil {
-		return nil, errors.Wrap(err, "Failed to create istio client")
+		return nil, fmt.Errorf("failed to create istio client: %w", err)
 	}
 
 	return ic, nil

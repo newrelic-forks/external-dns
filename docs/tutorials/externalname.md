@@ -1,4 +1,4 @@
-# Setting up ExternalDNS for ExternalName Services
+# ExternalName Services
 
 This tutorial describes how to setup ExternalDNS for usage in conjunction with an ExternalName service.
 
@@ -9,6 +9,7 @@ The main use cases that inspired this feature is the necessity for having a subd
 ## Setup
 
 ### External DNS
+
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -27,7 +28,7 @@ spec:
     spec:
       containers:
       - name: external-dns
-        image: registry.k8s.io/external-dns/external-dns:v0.13.5
+        image: registry.k8s.io/external-dns/external-dns:v0.17.0
         args:
         - --log-level=debug
         - --source=service
@@ -54,7 +55,8 @@ spec:
 ```
 
 This will create 2 CNAME records pointing to `aws.example.org`:
-```
+
+```sh
 tenant1.example.org
 tenant2.example.org
 ```
@@ -76,7 +78,8 @@ spec:
 ```
 
 This will create 2 A records pointing to `111.111.111.111`:
-```
+
+```sh
 tenant1.example.org
 tenant2.example.org
 ```

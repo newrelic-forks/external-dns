@@ -46,7 +46,7 @@ var (
 // initialized as dns provider with no records
 type InMemoryProvider struct {
 	provider.BaseProvider
-	domain         endpoint.DomainFilter
+	domain         endpoint.DomainFilterInterface
 	client         *inMemoryClient
 	filter         *filter
 	OnApplyChanges func(ctx context.Context, changes *plan.Changes)
@@ -77,7 +77,7 @@ func InMemoryWithLogging() InMemoryOption {
 }
 
 // InMemoryWithDomain modifies the domain on which dns zones are filtered
-func InMemoryWithDomain(domainFilter endpoint.DomainFilter) InMemoryOption {
+func InMemoryWithDomain(domainFilter *endpoint.DomainFilter) InMemoryOption {
 	return func(p *InMemoryProvider) {
 		p.domain = domainFilter
 	}
@@ -207,6 +207,7 @@ func copyEndpoints(endpoints []*endpoint.Endpoint) []*endpoint.Endpoint {
 		for k, v := range ep.Labels {
 			newEp.Labels[k] = v
 		}
+		newEp.ProviderSpecific = append(endpoint.ProviderSpecific(nil), ep.ProviderSpecific...)
 		records = append(records, newEp)
 	}
 	return records
@@ -311,7 +312,7 @@ func (c *inMemoryClient) validateChangeBatch(zone string, changes *plan.Changes)
 	}
 	mesh := sets.New[endpoint.EndpointKey]()
 	for _, newEndpoint := range changes.Create {
-		if _, exists := curZone[newEndpoint.Key()]; exists {
+		if _, ok := curZone[newEndpoint.Key()]; ok {
 			return ErrRecordAlreadyExists
 		}
 		if err := c.updateMesh(mesh, newEndpoint); err != nil {
@@ -319,7 +320,7 @@ func (c *inMemoryClient) validateChangeBatch(zone string, changes *plan.Changes)
 		}
 	}
 	for _, updateEndpoint := range changes.UpdateNew {
-		if _, exists := curZone[updateEndpoint.Key()]; !exists {
+		if _, ok := curZone[updateEndpoint.Key()]; !ok {
 			return ErrRecordNotFound
 		}
 		if err := c.updateMesh(mesh, updateEndpoint); err != nil {
@@ -327,12 +328,12 @@ func (c *inMemoryClient) validateChangeBatch(zone string, changes *plan.Changes)
 		}
 	}
 	for _, updateOldEndpoint := range changes.UpdateOld {
-		if rec, exists := curZone[updateOldEndpoint.Key()]; !exists || rec.Targets[0] != updateOldEndpoint.Targets[0] {
+		if rec, ok := curZone[updateOldEndpoint.Key()]; !ok || rec.Targets[0] != updateOldEndpoint.Targets[0] {
 			return ErrRecordNotFound
 		}
 	}
 	for _, deleteEndpoint := range changes.Delete {
-		if rec, exists := curZone[deleteEndpoint.Key()]; !exists || rec.Targets[0] != deleteEndpoint.Targets[0] {
+		if rec, ok := curZone[deleteEndpoint.Key()]; !ok || rec.Targets[0] != deleteEndpoint.Targets[0] {
 			return ErrRecordNotFound
 		}
 		if err := c.updateMesh(mesh, deleteEndpoint); err != nil {

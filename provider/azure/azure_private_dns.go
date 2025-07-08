@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	azcoreruntime "github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
@@ -47,43 +48,53 @@ type PrivateRecordSetsClient interface {
 // AzurePrivateDNSProvider implements the DNS provider for Microsoft's Azure Private DNS service
 type AzurePrivateDNSProvider struct {
 	provider.BaseProvider
-	domainFilter                 endpoint.DomainFilter
+	domainFilter                 *endpoint.DomainFilter
+	zoneNameFilter               *endpoint.DomainFilter
 	zoneIDFilter                 provider.ZoneIDFilter
 	dryRun                       bool
 	resourceGroup                string
 	userAssignedIdentityClientID string
+	activeDirectoryAuthorityHost string
 	zonesClient                  PrivateZonesClient
+	zonesCache                   *zonesCache[privatedns.PrivateZone]
 	recordSetsClient             PrivateRecordSetsClient
+	maxRetriesCount              int
 }
 
 // NewAzurePrivateDNSProvider creates a new Azure Private DNS provider.
 //
 // Returns the provider or an error if a provider could not be created.
-func NewAzurePrivateDNSProvider(configFile string, domainFilter endpoint.DomainFilter, zoneIDFilter provider.ZoneIDFilter, resourceGroup, userAssignedIdentityClientID string, dryRun bool) (*AzurePrivateDNSProvider, error) {
-	cfg, err := getConfig(configFile, resourceGroup, userAssignedIdentityClientID)
+func NewAzurePrivateDNSProvider(configFile string, domainFilter *endpoint.DomainFilter, zoneNameFilter *endpoint.DomainFilter, zoneIDFilter provider.ZoneIDFilter, subscriptionID string, resourceGroup string, userAssignedIdentityClientID string, activeDirectoryAuthorityHost string, zonesCacheDuration time.Duration, maxRetriesCount int, dryRun bool) (*AzurePrivateDNSProvider, error) {
+	cfg, err := getConfig(configFile, subscriptionID, resourceGroup, userAssignedIdentityClientID, activeDirectoryAuthorityHost)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read Azure config file '%s': %v", configFile, err)
+		return nil, fmt.Errorf("failed to read Azure config file '%s': %w", configFile, err)
 	}
-	cred, err := getCredentials(*cfg)
+
+	cred, clientOpts, err := getCredentials(*cfg, maxRetriesCount)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get credentials: %w", err)
 	}
-	zonesClient, err := privatedns.NewPrivateZonesClient(cfg.SubscriptionID, cred, nil)
+
+	zonesClient, err := privatedns.NewPrivateZonesClient(cfg.SubscriptionID, cred, clientOpts)
 	if err != nil {
 		return nil, err
 	}
-	recordSetsClient, err := privatedns.NewRecordSetsClient(cfg.SubscriptionID, cred, nil)
+	recordSetsClient, err := privatedns.NewRecordSetsClient(cfg.SubscriptionID, cred, clientOpts)
 	if err != nil {
 		return nil, err
 	}
 	return &AzurePrivateDNSProvider{
 		domainFilter:                 domainFilter,
+		zoneNameFilter:               zoneNameFilter,
 		zoneIDFilter:                 zoneIDFilter,
 		dryRun:                       dryRun,
 		resourceGroup:                cfg.ResourceGroup,
 		userAssignedIdentityClientID: cfg.UserAssignedIdentityID,
+		activeDirectoryAuthorityHost: cfg.ActiveDirectoryAuthorityHost,
 		zonesClient:                  zonesClient,
+		zonesCache:                   &zonesCache[privatedns.PrivateZone]{duration: zonesCacheDuration},
 		recordSetsClient:             recordSetsClient,
+		maxRetriesCount:              maxRetriesCount,
 	}, nil
 }
 
@@ -103,7 +114,7 @@ func (p *AzurePrivateDNSProvider) Records(ctx context.Context) (endpoints []*end
 		for pager.More() {
 			nextResult, err := pager.NextPage(ctx)
 			if err != nil {
-				return nil, err
+				return nil, provider.NewSoftError(fmt.Errorf("failed to fetch dns records: %w", err))
 			}
 
 			for _, recordSet := range nextResult.Value {
@@ -121,6 +132,10 @@ func (p *AzurePrivateDNSProvider) Records(ctx context.Context) (endpoints []*end
 				}
 				name = formatAzureDNSName(*recordSet.Name, *zone.Name)
 
+				if len(p.zoneNameFilter.Filters) > 0 && !p.domainFilter.Match(name) {
+					log.Debugf("Skipping return of record %s because it was filtered out by the specified --domain-filter", name)
+					continue
+				}
 				targets := extractAzurePrivateDNSTargets(recordSet)
 				if len(targets) == 0 {
 					log.Debugf("Failed to extract targets for '%s' with type '%s'.", name, recordType)
@@ -168,7 +183,10 @@ func (p *AzurePrivateDNSProvider) ApplyChanges(ctx context.Context, changes *pla
 
 func (p *AzurePrivateDNSProvider) zones(ctx context.Context) ([]privatedns.PrivateZone, error) {
 	log.Debugf("Retrieving Azure Private DNS zones for Resource Group '%s'", p.resourceGroup)
-
+	if !p.zonesCache.Expired() {
+		log.Debugf("Using cached Azure Private DNS zones for resource group: %s zone count: %d.", p.resourceGroup, len(p.zonesCache.Get()))
+		return p.zonesCache.Get(), nil
+	}
 	var zones []privatedns.PrivateZone
 
 	pager := p.zonesClient.NewListByResourceGroupPager(p.resourceGroup, &privatedns.PrivateZonesClientListByResourceGroupOptions{Top: nil})
@@ -182,11 +200,15 @@ func (p *AzurePrivateDNSProvider) zones(ctx context.Context) ([]privatedns.Priva
 
 			if zone.Name != nil && p.domainFilter.Match(*zone.Name) && p.zoneIDFilter.Match(*zone.ID) {
 				zones = append(zones, *zone)
+			} else if zone.Name != nil && len(p.zoneNameFilter.Filters) > 0 && p.zoneNameFilter.Match(*zone.Name) {
+				// Handle zoneNameFilter
+				zones = append(zones, *zone)
 			}
 		}
 	}
 
-	log.Debugf("Found %d Azure Private DNS zone(s).", len(zones))
+	log.Debugf("Found %d Azure Private DNS zone(s). Updating zones cache", len(zones))
+	p.zonesCache.Reset(zones)
 	return zones, nil
 }
 
@@ -235,6 +257,10 @@ func (p *AzurePrivateDNSProvider) deleteRecords(ctx context.Context, deleted azu
 	for zone, endpoints := range deleted {
 		for _, ep := range endpoints {
 			name := p.recordSetNameForZone(zone, ep)
+			if !p.domainFilter.Match(ep.DNSName) {
+				log.Debugf("Skipping deletion of record %s because it was filtered out by the specified --domain-filter", ep.DNSName)
+				continue
+			}
 			if p.dryRun {
 				log.Infof("Would delete %s record named '%s' for Azure Private DNS zone '%s'.", ep.RecordType, name, zone)
 			} else {
@@ -258,6 +284,10 @@ func (p *AzurePrivateDNSProvider) updateRecords(ctx context.Context, updated azu
 	for zone, endpoints := range updated {
 		for _, ep := range endpoints {
 			name := p.recordSetNameForZone(zone, ep)
+			if !p.domainFilter.Match(ep.DNSName) {
+				log.Debugf("Skipping update of record %s because it was filtered out by the specified --domain-filter", ep.DNSName)
+				continue
+			}
 			if p.dryRun {
 				log.Infof(
 					"Would update %s record named '%s' to '%s' for Azure Private DNS zone '%s'.",
@@ -317,7 +347,7 @@ func (p *AzurePrivateDNSProvider) recordSetNameForZone(zone string, endpoint *en
 }
 
 func (p *AzurePrivateDNSProvider) newRecordSet(endpoint *endpoint.Endpoint) (privatedns.RecordSet, error) {
-	var ttl int64 = azureRecordTTL
+	var ttl int64 = defaultTTL
 	if endpoint.RecordTTL.IsConfigured() {
 		ttl = int64(endpoint.RecordTTL)
 	}
@@ -333,6 +363,19 @@ func (p *AzurePrivateDNSProvider) newRecordSet(endpoint *endpoint.Endpoint) (pri
 			Properties: &privatedns.RecordSetProperties{
 				TTL:      to.Ptr(ttl),
 				ARecords: aRecords,
+			},
+		}, nil
+	case privatedns.RecordTypeAAAA:
+		aaaaRecords := make([]*privatedns.AaaaRecord, len(endpoint.Targets))
+		for i, target := range endpoint.Targets {
+			aaaaRecords[i] = &privatedns.AaaaRecord{
+				IPv6Address: to.Ptr(target),
+			}
+		}
+		return privatedns.RecordSet{
+			Properties: &privatedns.RecordSetProperties{
+				TTL:         to.Ptr(ttl),
+				AaaaRecords: aaaaRecords,
 			},
 		}, nil
 	case privatedns.RecordTypeCNAME:
@@ -389,6 +432,16 @@ func extractAzurePrivateDNSTargets(recordSet *privatedns.RecordSet) []string {
 		targets := make([]string, len(aRecords))
 		for i, aRecord := range aRecords {
 			targets[i] = *aRecord.IPv4Address
+		}
+		return targets
+	}
+
+	// Check for AAAA records
+	aaaaRecords := properties.AaaaRecords
+	if len(aaaaRecords) > 0 && (aaaaRecords)[0].IPv6Address != nil {
+		targets := make([]string, len(aaaaRecords))
+		for i, aaaaRecord := range aaaaRecords {
+			targets[i] = *aaaaRecord.IPv6Address
 		}
 		return targets
 	}

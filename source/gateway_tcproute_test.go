@@ -25,8 +25,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	"sigs.k8s.io/external-dns/endpoint"
+	v1 "sigs.k8s.io/gateway-api/apis/v1"
 	"sigs.k8s.io/gateway-api/apis/v1alpha2"
-	"sigs.k8s.io/gateway-api/apis/v1beta1"
+	v1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 	gatewayfake "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned/fake"
 )
 
@@ -54,9 +55,9 @@ func TestGatewayTCPRouteSourceEndpoints(t *testing.T) {
 			Name:      "internal",
 			Namespace: "default",
 		},
-		Spec: v1beta1.GatewaySpec{
-			Listeners: []v1beta1.Listener{{
-				Protocol: v1beta1.TCPProtocolType,
+		Spec: v1.GatewaySpec{
+			Listeners: []v1.Listener{{
+				Protocol: v1.TCPProtocolType,
 			}},
 		},
 		Status: gatewayStatus(ips...),
@@ -72,9 +73,15 @@ func TestGatewayTCPRouteSourceEndpoints(t *testing.T) {
 				hostnameAnnotationKey: "api-annotation.foobar.internal",
 			},
 		},
-		Spec: v1alpha2.TCPRouteSpec{},
+		Spec: v1alpha2.TCPRouteSpec{
+			CommonRouteSpec: v1.CommonRouteSpec{
+				ParentRefs: []v1.ParentReference{
+					gwParentRef("default", "internal"),
+				},
+			},
+		},
 		Status: v1alpha2.TCPRouteStatus{
-			RouteStatus: v1a2RouteStatus(v1a2ParentRef("default", "internal")),
+			RouteStatus: gwRouteStatus(gwParentRef("default", "internal")),
 		},
 	}
 	_, err = gwClient.GatewayV1alpha2().TCPRoutes(rt.Namespace).Create(ctx, rt, metav1.CreateOptions{})
@@ -92,32 +99,4 @@ func TestGatewayTCPRouteSourceEndpoints(t *testing.T) {
 		newTestEndpoint("api-annotation.foobar.internal", "A", ips...),
 		newTestEndpoint("api-template.foobar.internal", "A", ips...),
 	})
-}
-
-func v1a2ParentRef(namespace, name string) v1alpha2.ParentReference {
-	group := v1alpha2.Group("gateway.networking.k8s.io")
-	kind := v1alpha2.Kind("Gateway")
-	ref := v1alpha2.ParentReference{
-		Group:     &group,
-		Kind:      &kind,
-		Name:      v1alpha2.ObjectName(name),
-		Namespace: (*v1alpha2.Namespace)(&namespace),
-	}
-	return ref
-}
-
-func v1a2RouteStatus(refs ...v1alpha2.ParentReference) v1alpha2.RouteStatus {
-	var v v1alpha2.RouteStatus
-	for _, ref := range refs {
-		v.Parents = append(v.Parents, v1alpha2.RouteParentStatus{
-			ParentRef: ref,
-			Conditions: []metav1.Condition{
-				{
-					Type:   string(v1alpha2.RouteConditionAccepted),
-					Status: metav1.ConditionTrue,
-				},
-			},
-		})
-	}
-	return v
 }

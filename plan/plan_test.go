@@ -17,9 +17,13 @@ limitations under the License.
 package plan
 
 import (
+	"bytes"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
 	"sigs.k8s.io/external-dns/endpoint"
@@ -124,7 +128,7 @@ func (suite *PlanTestSuite) SetupTest() {
 	}
 	suite.dsAAAA = &endpoint.Endpoint{
 		DNSName:    "ds",
-		Targets:    endpoint.Targets{"1.1.1.1"},
+		Targets:    endpoint.Targets{"2001:DB8::1"},
 		RecordType: "AAAA",
 		Labels: map[string]string{
 			endpoint.ResourceLabelKey: "ingress/default/ds-AAAAA",
@@ -245,6 +249,48 @@ func (suite *PlanTestSuite) SetupTest() {
 	}
 }
 
+func TestPlan_ChangesJson_DecodeEncode(t *testing.T) {
+	ch := &Changes{
+		Create: []*endpoint.Endpoint{
+			{
+				DNSName: "foo",
+			},
+		},
+		UpdateOld: []*endpoint.Endpoint{
+			{
+				DNSName: "bar",
+			},
+		},
+		UpdateNew: []*endpoint.Endpoint{
+			{
+				DNSName: "baz",
+			},
+		},
+		Delete: []*endpoint.Endpoint{
+			{
+				DNSName: "qux",
+			},
+		},
+	}
+	jsonBytes, err := json.Marshal(ch)
+	require.NoError(t, err)
+	assert.JSONEq(t,
+		`{"create":[{"dnsName":"foo"}],"updateOld":[{"dnsName":"bar"}],"updateNew":[{"dnsName":"baz"}],"delete":[{"dnsName":"qux"}]}`,
+		string(jsonBytes))
+	var changes Changes
+	err = json.NewDecoder(bytes.NewBuffer(jsonBytes)).Decode(&changes)
+	require.NoError(t, err)
+	assert.Equal(t, ch, &changes)
+}
+
+func TestPlan_ChangesJson_DecodeMixedCase(t *testing.T) {
+	input := `{"Create":[{"dnsName":"foo"}],"UpdateOld":[{"dnsName":"bar"}],"updateNew":[{"dnsName":"baz"}],"Delete":[{"dnsName":"qux"}]}`
+	var changes Changes
+	err := json.NewDecoder(strings.NewReader(input)).Decode(&changes)
+	require.NoError(t, err)
+	assert.Len(t, changes.Create, 1)
+}
+
 func (suite *PlanTestSuite) TestSyncFirstRound() {
 	current := []*endpoint.Endpoint{}
 	desired := []*endpoint.Endpoint{suite.fooV1Cname, suite.fooV2Cname, suite.bar127A}
@@ -355,6 +401,36 @@ func (suite *PlanTestSuite) TestSyncSecondRoundWithProviderSpecificChange() {
 	validateEntries(suite.T(), changes.Delete, expectedDelete)
 }
 
+func (suite *PlanTestSuite) TestSyncSecondRoundWithProviderSpecificNoChange() {
+	current := []*endpoint.Endpoint{suite.bar127AWithProviderSpecificTrue}
+	desired := []*endpoint.Endpoint{suite.bar127AWithProviderSpecificTrue}
+
+	p := &Plan{
+		Policies:       []Policy{&SyncPolicy{}},
+		Current:        current,
+		Desired:        desired,
+		ManagedRecords: []string{endpoint.RecordTypeA, endpoint.RecordTypeCNAME},
+	}
+
+	changes := p.Calculate().Changes
+	suite.False(changes.HasChanges())
+}
+
+func (suite *PlanTestSuite) TestHasChanges() {
+	current := []*endpoint.Endpoint{suite.bar127AWithProviderSpecificTrue}
+	desired := []*endpoint.Endpoint{suite.bar127AWithProviderSpecificFalse}
+
+	p := &Plan{
+		Policies:       []Policy{&SyncPolicy{}},
+		Current:        current,
+		Desired:        desired,
+		ManagedRecords: []string{endpoint.RecordTypeA, endpoint.RecordTypeCNAME},
+	}
+
+	changes := p.Calculate().Changes
+	suite.True(changes.HasChanges())
+}
+
 func (suite *PlanTestSuite) TestSyncSecondRoundWithProviderSpecificRemoval() {
 	current := []*endpoint.Endpoint{suite.bar127AWithProviderSpecificFalse}
 	desired := []*endpoint.Endpoint{suite.bar127AWithProviderSpecificUnset}
@@ -452,19 +528,204 @@ func (suite *PlanTestSuite) TestIdempotency() {
 	validateEntries(suite.T(), changes.Delete, expectedDelete)
 }
 
-func (suite *PlanTestSuite) TestDifferentTypes() {
+func (suite *PlanTestSuite) TestRecordTypeChange() {
 	current := []*endpoint.Endpoint{suite.fooV1Cname}
-	desired := []*endpoint.Endpoint{suite.fooV2Cname, suite.fooA5}
+	desired := []*endpoint.Endpoint{suite.fooA5}
 	expectedCreate := []*endpoint.Endpoint{suite.fooA5}
-	expectedUpdateOld := []*endpoint.Endpoint{suite.fooV1Cname}
-	expectedUpdateNew := []*endpoint.Endpoint{suite.fooV2Cname}
+	expectedUpdateOld := []*endpoint.Endpoint{}
+	expectedUpdateNew := []*endpoint.Endpoint{}
+	expectedDelete := []*endpoint.Endpoint{suite.fooV1Cname}
+
+	p := &Plan{
+		Policies:       []Policy{&SyncPolicy{}},
+		Current:        current,
+		Desired:        desired,
+		ManagedRecords: []string{endpoint.RecordTypeA, endpoint.RecordTypeAAAA, endpoint.RecordTypeCNAME},
+		OwnerID:        suite.fooV1Cname.Labels[endpoint.OwnerLabelKey],
+	}
+
+	changes := p.Calculate().Changes
+	validateEntries(suite.T(), changes.Create, expectedCreate)
+	validateEntries(suite.T(), changes.UpdateNew, expectedUpdateNew)
+	validateEntries(suite.T(), changes.UpdateOld, expectedUpdateOld)
+	validateEntries(suite.T(), changes.Delete, expectedDelete)
+}
+
+func (suite *PlanTestSuite) TestExistingCNameWithDualStackDesired() {
+	current := []*endpoint.Endpoint{suite.fooV1Cname}
+	desired := []*endpoint.Endpoint{suite.fooA5, suite.fooAAAA}
+	expectedCreate := []*endpoint.Endpoint{suite.fooA5, suite.fooAAAA}
+	expectedUpdateOld := []*endpoint.Endpoint{}
+	expectedUpdateNew := []*endpoint.Endpoint{}
+	expectedDelete := []*endpoint.Endpoint{suite.fooV1Cname}
+
+	p := &Plan{
+		Policies:       []Policy{&SyncPolicy{}},
+		Current:        current,
+		Desired:        desired,
+		ManagedRecords: []string{endpoint.RecordTypeA, endpoint.RecordTypeAAAA, endpoint.RecordTypeCNAME},
+		OwnerID:        suite.fooV1Cname.Labels[endpoint.OwnerLabelKey],
+	}
+
+	changes := p.Calculate().Changes
+	validateEntries(suite.T(), changes.Create, expectedCreate)
+	validateEntries(suite.T(), changes.UpdateNew, expectedUpdateNew)
+	validateEntries(suite.T(), changes.UpdateOld, expectedUpdateOld)
+	validateEntries(suite.T(), changes.Delete, expectedDelete)
+}
+
+func (suite *PlanTestSuite) TestExistingDualStackWithCNameDesired() {
+	suite.fooA5.Labels[endpoint.OwnerLabelKey] = "nerf"
+	suite.fooAAAA.Labels[endpoint.OwnerLabelKey] = "nerf"
+	current := []*endpoint.Endpoint{suite.fooA5, suite.fooAAAA}
+	desired := []*endpoint.Endpoint{suite.fooV2Cname}
+	expectedCreate := []*endpoint.Endpoint{suite.fooV2Cname}
+	expectedUpdateOld := []*endpoint.Endpoint{}
+	expectedUpdateNew := []*endpoint.Endpoint{}
+	expectedDelete := []*endpoint.Endpoint{suite.fooA5, suite.fooAAAA}
+
+	p := &Plan{
+		Policies:       []Policy{&SyncPolicy{}},
+		Current:        current,
+		Desired:        desired,
+		ManagedRecords: []string{endpoint.RecordTypeA, endpoint.RecordTypeAAAA, endpoint.RecordTypeCNAME},
+		OwnerID:        suite.fooA5.Labels[endpoint.OwnerLabelKey],
+	}
+
+	changes := p.Calculate().Changes
+	validateEntries(suite.T(), changes.Create, expectedCreate)
+	validateEntries(suite.T(), changes.UpdateNew, expectedUpdateNew)
+	validateEntries(suite.T(), changes.UpdateOld, expectedUpdateOld)
+	validateEntries(suite.T(), changes.Delete, expectedDelete)
+}
+
+// TestExistingOwnerNotMatchingDualStackDesired validates that if there is an existing
+// record for a domain but there is no ownership claim over it and there are desired
+// records no changes are planed. Only domains that have explicit ownership claims should
+// be updated.
+func (suite *PlanTestSuite) TestExistingOwnerNotMatchingDualStackDesired() {
+	suite.fooA5.Labels = nil
+	current := []*endpoint.Endpoint{suite.fooA5}
+	desired := []*endpoint.Endpoint{suite.fooV2Cname}
+	expectedCreate := []*endpoint.Endpoint{}
+	expectedUpdateOld := []*endpoint.Endpoint{}
+	expectedUpdateNew := []*endpoint.Endpoint{}
 	expectedDelete := []*endpoint.Endpoint{}
 
 	p := &Plan{
 		Policies:       []Policy{&SyncPolicy{}},
 		Current:        current,
 		Desired:        desired,
-		ManagedRecords: []string{endpoint.RecordTypeA, endpoint.RecordTypeCNAME},
+		ManagedRecords: []string{endpoint.RecordTypeA, endpoint.RecordTypeAAAA, endpoint.RecordTypeCNAME},
+		OwnerID:        "pwner",
+	}
+
+	changes := p.Calculate().Changes
+	validateEntries(suite.T(), changes.Create, expectedCreate)
+	validateEntries(suite.T(), changes.UpdateNew, expectedUpdateNew)
+	validateEntries(suite.T(), changes.UpdateOld, expectedUpdateOld)
+	validateEntries(suite.T(), changes.Delete, expectedDelete)
+}
+
+// TestConflictingCurrentNonConflictingDesired is a bit of a corner case as it would indicate
+// that the provider is not following valid DNS rules or there may be some
+// caching issues. In this case since the desired records are not conflicting
+// the updates will end up with the conflict resolved.
+func (suite *PlanTestSuite) TestConflictingCurrentNonConflictingDesired() {
+	suite.fooA5.Labels[endpoint.OwnerLabelKey] = suite.fooV1Cname.Labels[endpoint.OwnerLabelKey]
+	current := []*endpoint.Endpoint{suite.fooV1Cname, suite.fooA5}
+	desired := []*endpoint.Endpoint{suite.fooA5}
+	expectedCreate := []*endpoint.Endpoint{}
+	expectedUpdateOld := []*endpoint.Endpoint{}
+	expectedUpdateNew := []*endpoint.Endpoint{}
+	expectedDelete := []*endpoint.Endpoint{suite.fooV1Cname}
+
+	p := &Plan{
+		Policies:       []Policy{&SyncPolicy{}},
+		Current:        current,
+		Desired:        desired,
+		ManagedRecords: []string{endpoint.RecordTypeA, endpoint.RecordTypeAAAA, endpoint.RecordTypeCNAME},
+		OwnerID:        suite.fooV1Cname.Labels[endpoint.OwnerLabelKey],
+	}
+
+	changes := p.Calculate().Changes
+	validateEntries(suite.T(), changes.Create, expectedCreate)
+	validateEntries(suite.T(), changes.UpdateNew, expectedUpdateNew)
+	validateEntries(suite.T(), changes.UpdateOld, expectedUpdateOld)
+	validateEntries(suite.T(), changes.Delete, expectedDelete)
+}
+
+// TestConflictingCurrentNoDesired is a bit of a corner case as it would indicate
+// that the provider is not following valid DNS rules or there may be some
+// caching issues. In this case there are no desired enpoint candidates so plan
+// on deleting the records.
+func (suite *PlanTestSuite) TestConflictingCurrentNoDesired() {
+	suite.fooA5.Labels[endpoint.OwnerLabelKey] = suite.fooV1Cname.Labels[endpoint.OwnerLabelKey]
+	current := []*endpoint.Endpoint{suite.fooV1Cname, suite.fooA5}
+	desired := []*endpoint.Endpoint{}
+	expectedCreate := []*endpoint.Endpoint{}
+	expectedUpdateOld := []*endpoint.Endpoint{}
+	expectedUpdateNew := []*endpoint.Endpoint{}
+	expectedDelete := []*endpoint.Endpoint{suite.fooV1Cname, suite.fooA5}
+
+	p := &Plan{
+		Policies:       []Policy{&SyncPolicy{}},
+		Current:        current,
+		Desired:        desired,
+		ManagedRecords: []string{endpoint.RecordTypeA, endpoint.RecordTypeAAAA, endpoint.RecordTypeCNAME},
+		OwnerID:        suite.fooV1Cname.Labels[endpoint.OwnerLabelKey],
+	}
+
+	changes := p.Calculate().Changes
+	validateEntries(suite.T(), changes.Create, expectedCreate)
+	validateEntries(suite.T(), changes.UpdateNew, expectedUpdateNew)
+	validateEntries(suite.T(), changes.UpdateOld, expectedUpdateOld)
+	validateEntries(suite.T(), changes.Delete, expectedDelete)
+}
+
+// TestCurrentWithConflictingDesired simulates where the desired records result in conflicting records types.
+// This could be the result of multiple sources generating conflicting records types. In this case the conflict
+// resolver should prefer the A and AAAA record candidate and delete the other records.
+func (suite *PlanTestSuite) TestCurrentWithConflictingDesired() {
+	suite.fooV1Cname.Labels[endpoint.OwnerLabelKey] = "nerf"
+	current := []*endpoint.Endpoint{suite.fooV1Cname}
+	desired := []*endpoint.Endpoint{suite.fooV1Cname, suite.fooA5, suite.fooAAAA}
+	expectedCreate := []*endpoint.Endpoint{suite.fooA5, suite.fooAAAA}
+	expectedUpdateOld := []*endpoint.Endpoint{}
+	expectedUpdateNew := []*endpoint.Endpoint{}
+	expectedDelete := []*endpoint.Endpoint{suite.fooV1Cname}
+
+	p := &Plan{
+		Policies:       []Policy{&SyncPolicy{}},
+		Current:        current,
+		Desired:        desired,
+		ManagedRecords: []string{endpoint.RecordTypeA, endpoint.RecordTypeAAAA, endpoint.RecordTypeCNAME},
+		OwnerID:        suite.fooV1Cname.Labels[endpoint.OwnerLabelKey],
+	}
+
+	changes := p.Calculate().Changes
+	validateEntries(suite.T(), changes.Create, expectedCreate)
+	validateEntries(suite.T(), changes.UpdateNew, expectedUpdateNew)
+	validateEntries(suite.T(), changes.UpdateOld, expectedUpdateOld)
+	validateEntries(suite.T(), changes.Delete, expectedDelete)
+}
+
+// TestNoCurrentWithConflictingDesired simulates where the desired records result in conflicting records types.
+// This could be the result of multiple sources generating conflicting records types. In this case there the
+// conflict resolver should prefer the A and AAAA record and drop the other candidate record types.
+func (suite *PlanTestSuite) TestNoCurrentWithConflictingDesired() {
+	current := []*endpoint.Endpoint{}
+	desired := []*endpoint.Endpoint{suite.fooV1Cname, suite.fooA5, suite.fooAAAA}
+	expectedCreate := []*endpoint.Endpoint{suite.fooA5, suite.fooAAAA}
+	expectedUpdateOld := []*endpoint.Endpoint{}
+	expectedUpdateNew := []*endpoint.Endpoint{}
+	expectedDelete := []*endpoint.Endpoint{}
+
+	p := &Plan{
+		Policies:       []Policy{&SyncPolicy{}},
+		Current:        current,
+		Desired:        desired,
+		ManagedRecords: []string{endpoint.RecordTypeA, endpoint.RecordTypeAAAA, endpoint.RecordTypeCNAME},
 	}
 
 	changes := p.Calculate().Changes
@@ -487,6 +748,29 @@ func (suite *PlanTestSuite) TestIgnoreTXT() {
 		Current:        current,
 		Desired:        desired,
 		ManagedRecords: []string{endpoint.RecordTypeA, endpoint.RecordTypeCNAME},
+	}
+
+	changes := p.Calculate().Changes
+	validateEntries(suite.T(), changes.Create, expectedCreate)
+	validateEntries(suite.T(), changes.UpdateNew, expectedUpdateNew)
+	validateEntries(suite.T(), changes.UpdateOld, expectedUpdateOld)
+	validateEntries(suite.T(), changes.Delete, expectedDelete)
+}
+
+func (suite *PlanTestSuite) TestExcludeTXT() {
+	current := []*endpoint.Endpoint{suite.fooV2TXT}
+	desired := []*endpoint.Endpoint{suite.fooV2Cname}
+	expectedCreate := []*endpoint.Endpoint{suite.fooV2Cname}
+	expectedUpdateOld := []*endpoint.Endpoint{}
+	expectedUpdateNew := []*endpoint.Endpoint{}
+	expectedDelete := []*endpoint.Endpoint{}
+
+	p := &Plan{
+		Policies:       []Policy{&SyncPolicy{}},
+		Current:        current,
+		Desired:        desired,
+		ManagedRecords: []string{endpoint.RecordTypeA, endpoint.RecordTypeCNAME, endpoint.RecordTypeTXT},
+		ExcludeRecords: []string{endpoint.RecordTypeTXT},
 	}
 
 	changes := p.Calculate().Changes
@@ -618,7 +902,7 @@ func (suite *PlanTestSuite) TestDomainFiltersInitial() {
 		Policies:       []Policy{&SyncPolicy{}},
 		Current:        current,
 		Desired:        desired,
-		DomainFilter:   endpoint.MatchAllDomainFilters{&domainFilter},
+		DomainFilter:   endpoint.MatchAllDomainFilters{domainFilter},
 		ManagedRecords: []string{endpoint.RecordTypeA, endpoint.RecordTypeCNAME},
 	}
 
@@ -642,7 +926,7 @@ func (suite *PlanTestSuite) TestDomainFiltersUpdate() {
 		Policies:       []Policy{&SyncPolicy{}},
 		Current:        current,
 		Desired:        desired,
-		DomainFilter:   endpoint.MatchAllDomainFilters{&domainFilter},
+		DomainFilter:   endpoint.MatchAllDomainFilters{domainFilter},
 		ManagedRecords: []string{endpoint.RecordTypeA, endpoint.RecordTypeCNAME},
 	}
 
@@ -654,10 +938,10 @@ func (suite *PlanTestSuite) TestDomainFiltersUpdate() {
 }
 
 func (suite *PlanTestSuite) TestAAAARecords() {
-
 	current := []*endpoint.Endpoint{}
 	desired := []*endpoint.Endpoint{suite.fooAAAA}
 	expectedCreate := []*endpoint.Endpoint{suite.fooAAAA}
+	expectNoChanges := []*endpoint.Endpoint{}
 
 	p := &Plan{
 		Policies:       []Policy{&SyncPolicy{}},
@@ -668,12 +952,16 @@ func (suite *PlanTestSuite) TestAAAARecords() {
 
 	changes := p.Calculate().Changes
 	validateEntries(suite.T(), changes.Create, expectedCreate)
+	validateEntries(suite.T(), changes.Delete, expectNoChanges)
+	validateEntries(suite.T(), changes.UpdateOld, expectNoChanges)
+	validateEntries(suite.T(), changes.UpdateNew, expectNoChanges)
 }
 
 func (suite *PlanTestSuite) TestDualStackRecords() {
 	current := []*endpoint.Endpoint{}
 	desired := []*endpoint.Endpoint{suite.dsA, suite.dsAAAA}
 	expectedCreate := []*endpoint.Endpoint{suite.dsA, suite.dsAAAA}
+	expectNoChanges := []*endpoint.Endpoint{}
 
 	p := &Plan{
 		Policies:       []Policy{&SyncPolicy{}},
@@ -684,6 +972,49 @@ func (suite *PlanTestSuite) TestDualStackRecords() {
 
 	changes := p.Calculate().Changes
 	validateEntries(suite.T(), changes.Create, expectedCreate)
+	validateEntries(suite.T(), changes.Delete, expectNoChanges)
+	validateEntries(suite.T(), changes.UpdateOld, expectNoChanges)
+	validateEntries(suite.T(), changes.UpdateNew, expectNoChanges)
+}
+
+func (suite *PlanTestSuite) TestDualStackRecordsDelete() {
+	current := []*endpoint.Endpoint{suite.dsA, suite.dsAAAA}
+	desired := []*endpoint.Endpoint{}
+	expectedDelete := []*endpoint.Endpoint{suite.dsA, suite.dsAAAA}
+	expectNoChanges := []*endpoint.Endpoint{}
+
+	p := &Plan{
+		Policies:       []Policy{&SyncPolicy{}},
+		Current:        current,
+		Desired:        desired,
+		ManagedRecords: []string{endpoint.RecordTypeA, endpoint.RecordTypeAAAA, endpoint.RecordTypeCNAME},
+	}
+
+	changes := p.Calculate().Changes
+	validateEntries(suite.T(), changes.Delete, expectedDelete)
+	validateEntries(suite.T(), changes.Create, expectNoChanges)
+	validateEntries(suite.T(), changes.UpdateOld, expectNoChanges)
+	validateEntries(suite.T(), changes.UpdateNew, expectNoChanges)
+}
+
+func (suite *PlanTestSuite) TestDualStackToSingleStack() {
+	current := []*endpoint.Endpoint{suite.dsA, suite.dsAAAA}
+	desired := []*endpoint.Endpoint{suite.dsA}
+	expectedDelete := []*endpoint.Endpoint{suite.dsAAAA}
+	expectNoChanges := []*endpoint.Endpoint{}
+
+	p := &Plan{
+		Policies:       []Policy{&SyncPolicy{}},
+		Current:        current,
+		Desired:        desired,
+		ManagedRecords: []string{endpoint.RecordTypeA, endpoint.RecordTypeAAAA, endpoint.RecordTypeCNAME},
+	}
+
+	changes := p.Calculate().Changes
+	validateEntries(suite.T(), changes.Delete, expectedDelete)
+	validateEntries(suite.T(), changes.Create, expectNoChanges)
+	validateEntries(suite.T(), changes.UpdateOld, expectNoChanges)
+	validateEntries(suite.T(), changes.UpdateNew, expectNoChanges)
 }
 
 func TestPlan(t *testing.T) {
@@ -745,6 +1076,26 @@ func TestNormalizeDNSName(t *testing.T) {
 		{
 			"my-example-my-example-1214.FOO-1235.BAR-foo.COM",
 			"my-example-my-example-1214.foo-1235.bar-foo.com.",
+		},
+		{
+			"點看.org.",
+			"xn--c1yn36f.org.",
+		},
+		{
+			"nordic-ø.xn--kitty-點看pd34d.com",
+			"xn--nordic--w1a.xn--xn--kitty-pd34d-hn01b3542b.com.",
+		},
+		{
+			"nordic-ø.kitty😸.com.",
+			"xn--nordic--w1a.xn--kitty-pd34d.com.",
+		},
+		{
+			"  nordic-ø.kitty😸.COM",
+			"xn--nordic--w1a.xn--kitty-pd34d.com.",
+		},
+		{
+			"xn--nordic--w1a.kitty😸.com.",
+			"xn--nordic--w1a.xn--kitty-pd34d.com.",
 		},
 	}
 	for _, r := range records {

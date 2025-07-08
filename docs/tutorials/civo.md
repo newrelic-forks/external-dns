@@ -1,4 +1,4 @@
-# Setting up ExternalDNS for Services on Civo
+# Civo DNS
 
 This tutorial describes how to setup ExternalDNS for usage within a Kubernetes cluster using Civo DNS Manager.
 
@@ -40,7 +40,7 @@ spec:
     spec:
       containers:
       - name: external-dns
-        image: registry.k8s.io/external-dns/external-dns:v0.13.5
+        image: registry.k8s.io/external-dns/external-dns:v0.17.0
         args:
         - --source=service # ingress is also possible
         - --domain-filter=example.com # (optional) limit to only example.com domains; change to match the zone created above.
@@ -104,7 +104,7 @@ spec:
       serviceAccountName: external-dns
       containers:
       - name: external-dns
-        image: registry.k8s.io/external-dns/external-dns:v0.13.5
+        image: registry.k8s.io/external-dns/external-dns:v0.17.0
         args:
         - --source=service # ingress is also possible
         - --domain-filter=example.com # (optional) limit to only example.com domains; change to match the zone created above.
@@ -161,7 +161,7 @@ ExternalDNS uses this annotation to determine what services should be registered
 Create the deployment and service:
 
 ```console
-$ kubectl create -f nginx.yaml
+kubectl create -f nginx.yaml
 ```
 
 Depending where you run your service it can take a little while for your cloud provider to create an external IP for the service.
@@ -180,7 +180,7 @@ This should show the external IP address of the service as the A record for your
 
 Now that we have verified that ExternalDNS will automatically manage Civo DNS records, we can delete the tutorial's example:
 
-```
-$ kubectl delete service -f nginx.yaml
-$ kubectl delete service -f externaldns.yaml
+```sh
+kubectl delete service -f nginx.yaml
+kubectl delete service -f externaldns.yaml
 ```

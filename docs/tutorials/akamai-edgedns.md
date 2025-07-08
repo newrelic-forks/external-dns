@@ -1,4 +1,4 @@
-# Setting up External-DNS for Services on Akamai Edge DNS
+# Akamai Edge DNS
 
 ## Prerequisites
 
@@ -6,11 +6,12 @@ External-DNS v0.8.0 or greater.
 
 ### Zones
 
-External-DNS manages service endpoints in existing DNS zones. The Akamai provider does not add, remove or configure new zones. The [Akamai Control Center](https://control.akamai.com) or [Akamai DevOps Tools](https://developer.akamai.com/devops), [Akamai CLI](https://developer.akamai.com/cli) and [Akamai Terraform Provider](https://developer.akamai.com/tools/integrations/terraform) can create and manage Edge DNS zones. 
+External-DNS manages service endpoints in existing DNS zones. The Akamai provider does not add, remove or configure new zones.
+The [Akamai Control Center](https://control.akamai.com) or [Akamai DevOps Tools](https://developer.akamai.com/devops), [Akamai CLI](https://developer.akamai.com/cli) and [Akamai Terraform Provider](https://developer.akamai.com/tools/integrations/terraform) can create and manage Edge DNS zones.
 
 ### Akamai Edge DNS Authentication
 
-The Akamai Edge DNS provider requires valid Akamai Edgegrid API authentication credentials to access zones and manage  DNS records. 
+The Akamai Edge DNS provider requires valid Akamai Edgegrid API authentication credentials to access zones and manage  DNS records.
 
 Either directly by key or indirectly via a file can set credentials for the provider. The Akamai credential keys and mappings to the Akamai provider utilizing different presentation methods are:
 
@@ -34,7 +35,53 @@ In addition to specifying auth credentials individually, an Akamai Edgegrid .edg
 
 An operational External-DNS deployment consists of an External-DNS container and service. The following sections demonstrate the ConfigMap objects that would make up an example functional external DNS kubernetes configuration utilizing NGINX as the service.
 
-Connect your `kubectl` client to the External-DNS cluster, and then apply one of the following manifest files:
+Connect your `kubectl` client to the External-DNS cluster.
+
+Begin by creating a Kubernetes secret to securely store your  Akamai Edge DNS Access Tokens. This key will enable ExternalDNS to authenticate with Akamai Edge DNS:
+
+```shell
+kubectl create secret generic AKAMAI-DNS --from-literal=EXTERNAL_DNS_AKAMAI_SERVICECONSUMERDOMAIN=YOUR_SERVICECONSUMERDOMAIN --from-literal=EXTERNAL_DNS_AKAMAI_CLIENT_TOKEN=YOUR_CLIENT_TOKEN --from-literal=EXTERNAL_DNS_AKAMAI_CLIENT_SECRET=YOUR_CLIENT_SECRET --from-literal=EXTERNAL_DNS_AKAMAI_ACCESS_TOKEN=YOUR_ACCESS_TOKEN
+```
+
+Ensure to replace YOUR_SERVICECONSUMERDOMAIN, EXTERNAL_DNS_AKAMAI_CLIENT_TOKEN, YOUR_CLIENT_SECRET and YOUR_ACCESS_TOKEN with your actual Akamai Edge DNS API keys.
+
+Then apply one of the following manifests file to deploy ExternalDNS.
+
+### Using Helm
+
+Create a values.yaml file to configure ExternalDNS to use Akamai Edge DNS as the DNS provider. This file should include the necessary environment variables:
+
+```shell
+provider:
+  name: akamai
+env:
+  - name: EXTERNAL_DNS_AKAMAI_SERVICECONSUMERDOMAIN
+    valueFrom:
+      secretKeyRef:
+        name: AKAMAI-DNS
+        key: EXTERNAL_DNS_AKAMAI_SERVICECONSUMERDOMAIN
+  - name: EXTERNAL_DNS_AKAMAI_CLIENT_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: AKAMAI-DNS
+        key: EXTERNAL_DNS_AKAMAI_CLIENT_TOKEN
+  - name: EXTERNAL_DNS_AKAMAI_CLIENT_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: AKAMAI-DNS
+        key: EXTERNAL_DNS_AKAMAI_CLIENT_SECRET
+  - name: EXTERNAL_DNS_AKAMAI_ACCESS_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: AKAMAI-DNS
+        key: EXTERNAL_DNS_AKAMAI_ACCESS_TOKEN
+```
+
+Finally, install the ExternalDNS chart with Helm using the configuration specified in your values.yaml file:
+
+```shell
+helm upgrade --install external-dns external-dns/external-dns --values values.yaml
+```
 
 ### Manifest (for clusters without RBAC enabled)
 
@@ -57,7 +104,7 @@ spec:
       serviceAccountName: external-dns
       containers:
       - name: external-dns
-        image: registry.k8s.io/external-dns/external-dns:v0.13.5
+        image: registry.k8s.io/external-dns/external-dns:v0.17.0
         args:
         - --source=service  # or ingress or both
         - --provider=akamai
@@ -70,22 +117,22 @@ spec:
         - name: EXTERNAL_DNS_AKAMAI_SERVICECONSUMERDOMAIN
           valueFrom:
             secretKeyRef:
-              name: external-dns
+              name: AKAMAI-DNS
               key: EXTERNAL_DNS_AKAMAI_SERVICECONSUMERDOMAIN
         - name: EXTERNAL_DNS_AKAMAI_CLIENT_TOKEN
           valueFrom:
             secretKeyRef:
-              name: external-dns
+              name: AKAMAI-DNS
               key: EXTERNAL_DNS_AKAMAI_CLIENT_TOKEN
         - name: EXTERNAL_DNS_AKAMAI_CLIENT_SECRET
           valueFrom:
             secretKeyRef:
-              name: external-dns
+              name: AKAMAI-DNS
               key: EXTERNAL_DNS_AKAMAI_CLIENT_SECRET
         - name: EXTERNAL_DNS_AKAMAI_ACCESS_TOKEN
           valueFrom:
             secretKeyRef:
-              name: external-dns
+              name: AKAMAI-DNS
               key: EXTERNAL_DNS_AKAMAI_ACCESS_TOKEN
 ```
 
@@ -143,7 +190,7 @@ spec:
       serviceAccountName: external-dns
       containers:
       - name: external-dns
-        image: registry.k8s.io/external-dns/external-dns:v0.13.5
+        image: registry.k8s.io/external-dns/external-dns:v0.17.0
         args:
         - --source=service  # or ingress or both
         - --provider=akamai
@@ -156,29 +203,29 @@ spec:
         - name: EXTERNAL_DNS_AKAMAI_SERVICECONSUMERDOMAIN
           valueFrom:
             secretKeyRef:
-              name: external-dns
+              name: AKAMAI-DNS
               key: EXTERNAL_DNS_AKAMAI_SERVICECONSUMERDOMAIN
         - name: EXTERNAL_DNS_AKAMAI_CLIENT_TOKEN
           valueFrom:
             secretKeyRef:
-              name: external-dns
+              name: AKAMAI-DNS
               key: EXTERNAL_DNS_AKAMAI_CLIENT_TOKEN
         - name: EXTERNAL_DNS_AKAMAI_CLIENT_SECRET
           valueFrom:
             secretKeyRef:
-              name: external-dns
+              name: AKAMAI-DNS
               key: EXTERNAL_DNS_AKAMAI_CLIENT_SECRET
         - name: EXTERNAL_DNS_AKAMAI_ACCESS_TOKEN
           valueFrom:
             secretKeyRef:
-              name: external-dns
+              name: AKAMAI-DNS
               key: EXTERNAL_DNS_AKAMAI_ACCESS_TOKEN
 ```
 
 Create the deployment for External-DNS:
 
-```
-$ kubectl apply -f externaldns.yaml
+```sh
+kubectl apply -f externaldns.yaml
 ```
 
 ## Deploying an Nginx Service
@@ -224,8 +271,8 @@ spec:
 
 Create the deployment and service object:
 
-```
-$ kubectl apply -f nginx.yaml
+```sh
+kubectl apply -f nginx.yaml
 ```
 
 ## Verify Akamai Edge DNS Records
@@ -233,14 +280,14 @@ $ kubectl apply -f nginx.yaml
 Wait 3-5 minutes before validating the records to allow the record changes to propagate to all the Akamai name servers.
 
 Validate records using the [Akamai Control Center](http://control.akamai.com) or by executing a dig, nslookup or similar DNS command.
- 
+
 ## Cleanup
 
 Once you successfully configure and verify record management via External-DNS, you can delete the tutorial's examples:
 
-```
-$ kubectl delete -f nginx.yaml
-$ kubectl delete -f externaldns.yaml
+```sh
+kubectl delete -f nginx.yaml
+kubectl delete -f externaldns.yaml
 ```
 
 ## Additional Information

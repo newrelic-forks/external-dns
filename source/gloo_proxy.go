@@ -19,6 +19,7 @@ package source
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -29,6 +30,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"sigs.k8s.io/external-dns/endpoint"
+	"sigs.k8s.io/external-dns/source/annotations"
 )
 
 var (
@@ -96,15 +98,16 @@ type proxyVirtualHostMetadataSourceResourceRef struct {
 type glooSource struct {
 	dynamicKubeClient dynamic.Interface
 	kubeClient        kubernetes.Interface
-	glooNamespace     string
+	glooNamespaces    []string
 }
 
 // NewGlooSource creates a new glooSource with the given config
-func NewGlooSource(dynamicKubeClient dynamic.Interface, kubeClient kubernetes.Interface, glooNamespace string) (Source, error) {
+func NewGlooSource(dynamicKubeClient dynamic.Interface, kubeClient kubernetes.Interface,
+	glooNamespaces []string) (Source, error) {
 	return &glooSource{
 		dynamicKubeClient,
 		kubeClient,
-		glooNamespace,
+		glooNamespaces,
 	}, nil
 }
 
@@ -115,51 +118,58 @@ func (gs *glooSource) AddEventHandler(ctx context.Context, handler func()) {
 func (gs *glooSource) Endpoints(ctx context.Context) ([]*endpoint.Endpoint, error) {
 	endpoints := []*endpoint.Endpoint{}
 
-	proxies, err := gs.dynamicKubeClient.Resource(proxyGVR).Namespace(gs.glooNamespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil, err
-	}
-	for _, obj := range proxies.Items {
-		proxy := proxy{}
-		jsonString, err := obj.MarshalJSON()
+	for _, ns := range gs.glooNamespaces {
+		proxies, err := gs.dynamicKubeClient.Resource(proxyGVR).Namespace(ns).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			return nil, err
 		}
-		err = json.Unmarshal(jsonString, &proxy)
-		if err != nil {
-			return nil, err
+		for _, obj := range proxies.Items {
+			proxy := proxy{}
+			jsonString, err := obj.MarshalJSON()
+			if err != nil {
+				return nil, err
+			}
+			err = json.Unmarshal(jsonString, &proxy)
+			if err != nil {
+				return nil, err
+			}
+			log.Debugf("Gloo: Find %s proxy", proxy.Metadata.Name)
+
+			proxyTargets := annotations.TargetsFromTargetAnnotation(proxy.Metadata.Annotations)
+			if len(proxyTargets) == 0 {
+				proxyTargets, err = gs.proxyTargets(ctx, proxy.Metadata.Name, ns)
+				if err != nil {
+					return nil, err
+				}
+			}
+			log.Debugf("Gloo[%s]: Find %d target(s) (%+v)", proxy.Metadata.Name, len(proxyTargets), proxyTargets)
+
+			proxyEndpoints, err := gs.generateEndpointsFromProxy(ctx, &proxy, proxyTargets)
+			if err != nil {
+				return nil, err
+			}
+			log.Debugf("Gloo[%s]: Generate %d endpoint(s)", proxy.Metadata.Name, len(proxyEndpoints))
+			endpoints = append(endpoints, proxyEndpoints...)
 		}
-		log.Debugf("Gloo: Find %s proxy", proxy.Metadata.Name)
-		proxyTargets, err := gs.proxyTargets(ctx, proxy.Metadata.Name)
-		if err != nil {
-			return nil, err
-		}
-		log.Debugf("Gloo[%s]: Find %d target(s) (%+v)", proxy.Metadata.Name, len(proxyTargets), proxyTargets)
-		proxyEndpoints, err := gs.generateEndpointsFromProxy(ctx, &proxy, proxyTargets)
-		if err != nil {
-			return nil, err
-		}
-		log.Debugf("Gloo[%s]: Generate %d endpoint(s)", proxy.Metadata.Name, len(proxyEndpoints))
-		endpoints = append(endpoints, proxyEndpoints...)
 	}
 	return endpoints, nil
 }
 
 func (gs *glooSource) generateEndpointsFromProxy(ctx context.Context, proxy *proxy, targets endpoint.Targets) ([]*endpoint.Endpoint, error) {
 	endpoints := []*endpoint.Endpoint{}
+
+	resource := fmt.Sprintf("proxy/%s/%s", proxy.Metadata.Namespace, proxy.Metadata.Name)
+
 	for _, listener := range proxy.Spec.Listeners {
 		for _, virtualHost := range listener.HTTPListener.VirtualHosts {
-			annotations, err := gs.annotationsFromProxySource(ctx, virtualHost)
+			ants, err := gs.annotationsFromProxySource(ctx, virtualHost)
 			if err != nil {
 				return nil, err
 			}
-			ttl, err := getTTLFromAnnotations(annotations)
-			if err != nil {
-				return nil, err
-			}
-			providerSpecific, setIdentifier := getProviderSpecificAnnotations(annotations)
+			ttl := annotations.TTLFromAnnotations(ants, resource)
+			providerSpecific, setIdentifier := annotations.ProviderSpecificAnnotations(ants)
 			for _, domain := range virtualHost.Domains {
-				endpoints = append(endpoints, endpointsForHostname(strings.TrimSuffix(domain, "."), targets, ttl, providerSpecific, setIdentifier)...)
+				endpoints = append(endpoints, endpointsForHostname(strings.TrimSuffix(domain, "."), targets, ttl, providerSpecific, setIdentifier, "")...)
 			}
 		}
 	}
@@ -167,7 +177,7 @@ func (gs *glooSource) generateEndpointsFromProxy(ctx context.Context, proxy *pro
 }
 
 func (gs *glooSource) annotationsFromProxySource(ctx context.Context, virtualHost proxyVirtualHost) (map[string]string, error) {
-	annotations := map[string]string{}
+	ants := map[string]string{}
 	for _, src := range virtualHost.Metadata.Source {
 		kind := sourceKind(src.Kind)
 		if kind != nil {
@@ -176,7 +186,7 @@ func (gs *glooSource) annotationsFromProxySource(ctx context.Context, virtualHos
 				return nil, err
 			}
 			for key, value := range source.GetAnnotations() {
-				annotations[key] = value
+				ants[key] = value
 			}
 		}
 	}
@@ -188,15 +198,15 @@ func (gs *glooSource) annotationsFromProxySource(ctx context.Context, virtualHos
 				return nil, err
 			}
 			for key, value := range source.GetAnnotations() {
-				annotations[key] = value
+				ants[key] = value
 			}
 		}
 	}
-	return annotations, nil
+	return ants, nil
 }
 
-func (gs *glooSource) proxyTargets(ctx context.Context, name string) (endpoint.Targets, error) {
-	svc, err := gs.kubeClient.CoreV1().Services(gs.glooNamespace).Get(ctx, name, metav1.GetOptions{})
+func (gs *glooSource) proxyTargets(ctx context.Context, name string, namespace string) (endpoint.Targets, error) {
+	svc, err := gs.kubeClient.CoreV1().Services(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
